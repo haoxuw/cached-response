@@ -15,7 +15,7 @@ and independently verified:
 
 Each finding has a regression in `tests/test_review_regressions.py`. The final
 suite now includes tests for mode-free exact caching and default model verification;
-95 tests pass. Five new regressions were observed failing before repair;
+98 tests pass. Five new regressions were observed failing before repair;
 the Windows import failure was reproduced independently before its repair. The
 Windows regression simulates absence of `os.getuid`; it is not a Windows host run.
 No external model calls or GKE runs were needed for these repairs.

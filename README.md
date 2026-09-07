@@ -4,7 +4,7 @@ Save function results on disk and reuse them. No cache server or required
 dependencies. Python 3.11+.
 
 ```sh
-python -m pip install .  # From this repository; not yet on PyPI.
+python -m pip install cached-response
 ```
 
 ## cached_llm_response

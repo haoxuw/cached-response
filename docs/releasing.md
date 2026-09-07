@@ -1,30 +1,28 @@
-# Releasing to PyPI
+# Releases
 
-The package has not yet been published to PyPI. Build and inspect it before
-uploading:
+CI runs the tests and checks code style on every push to `main` and every pull
+request, using Python 3.11–3.14 on Linux.
+
+To publish a version:
+
+1. Update `version` in `pyproject.toml`, commit, and push to `main`.
+2. Wait for CI to pass.
+3. Tag that commit with its version and push the tag:
 
 ```sh
-python -m pip install build twine
-python -m pytest
-python -m build
-python -m twine check dist/*
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
-Use a PyPI account with a verified email and two-factor authentication. Its
-username can differ from the GitHub owner `haoxuw`. Author metadata currently
-uses `haoxuw` and the license is MIT; no public personal email is required here.
+Use a new version for every release. The `release.yaml` workflow checks that the
+tag matches the package version, runs tests, builds a wheel and source archive,
+and tests the built wheel. A separate job uploads those files to PyPI. A final
+job installs the published package from PyPI and runs both minimal examples.
 
-For automated releases from `haoxuw/cached-response`, register a PyPI pending
-Trusted Publisher with the package name, repository owner/name, workflow filename,
-and optional GitHub environment. That allows a first release without a long-lived
-upload token. See [PyPI Trusted Publishers](https://docs.pypi.org/trusted-publishers/).
-A local release can instead use a PyPI API token supplied through a credential
-store; do not put credentials in source code or chat.
+Publishing uses the `pypi` GitHub environment and PyPI Trusted Publishing. The
+registered workflow filename must be `release.yaml`. No upload token is needed.
+See [PyPI's instructions](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
 
-Check the package name again before publishing. A missing public project does not
-guarantee PyPI will accept its name. Publication and a remote repository push need
-the owner's authorization; building locally does not publish anything.
-
-Ship only library code, tests, and public documentation. Keep private captures,
-SQLite files, credentials, and private inputs out of both distributions and the
-remote repository. Once published, increment the version for the next release.
+Only version tags publish; ordinary commits and pull requests cannot publish.
+To retry a failed release, rerun its failed jobs in GitHub Actions. Avoid rerunning
+a successful upload: PyPI does not allow replacing an existing release file.
