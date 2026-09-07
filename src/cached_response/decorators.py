@@ -11,6 +11,7 @@ import random
 import sys
 import threading
 import time
+import types
 import uuid
 from collections import Counter
 from collections.abc import Callable
@@ -238,14 +239,37 @@ async def async_lookup(lookup, *args):
         raise
 
 
+def code_fingerprint(value):
+    """Serialize code constants without reference-sharing or slice limitations.
+
+    The rewritten code object is only hashed, never executed or loaded.
+    Type prefixes prevent a slice and a tuple of its bounds from colliding.
+    """
+    if isinstance(value, types.CodeType):
+        value = value.replace(
+            co_consts=tuple(code_fingerprint(item) for item in value.co_consts)
+        )
+        return b"code:" + marshal.dumps(value, MARSHAL_VERSION)
+    if isinstance(value, slice):
+        return b"slice:" + code_fingerprint(
+            (value.start, value.stop, value.step)
+        )
+    if isinstance(value, (tuple, frozenset)):
+        items = [code_fingerprint(item) for item in value]
+        if isinstance(value, frozenset):
+            items.sort()
+        return type(value).__name__.encode() + marshal.dumps(
+            items, MARSHAL_VERSION
+        )
+    return b"value:" + marshal.dumps(value, MARSHAL_VERSION)
+
+
 def decorate(function, llm, overrides, version):
     identity = digest(
         {
             "function": f"{function.__module__}.{function.__qualname__}",
             "version": version
-            or hashlib.sha256(
-                marshal.dumps(function.__code__, MARSHAL_VERSION)
-            ).hexdigest(),
+            or hashlib.sha256(code_fingerprint(function.__code__)).hexdigest(),
         }
     )
     try:

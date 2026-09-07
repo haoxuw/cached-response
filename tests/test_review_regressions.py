@@ -165,3 +165,25 @@ def test_cancelled_lookup_releases_ticket_when_worker_finishes(
     assert not calls
     with Store(path).connect() as db:
         assert db.execute("SELECT COUNT(*) FROM leases").fetchone()[0] == 0
+
+
+def test_slice_constants_support_stable_function_identity(tmp_path):
+    import inspect
+
+    calls = []
+
+    def upstream(value):
+        calls.append(value)
+        return value[1:3]
+
+    # Python 3.14 can compile slices into constants. Simulate that on older
+    # runtimes too, without executing the extra constant.
+    upstream.__code__ = upstream.__code__.replace(
+        co_consts=upstream.__code__.co_consts + (slice(1, 3),)
+    )
+    first = cached_staticmethod(path=tmp_path / "slice.db")(upstream)
+    assert first("abcd") == "bc"
+    inspect.signature(upstream)
+    second = cached_staticmethod(path=tmp_path / "slice.db")(upstream)
+    assert second("abcd") == "bc"
+    assert calls == ["abcd"]
