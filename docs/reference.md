@@ -60,11 +60,115 @@ does not share a cache across machines or survive every container restart.
 Use `configure(path=...)` to point to retained local storage. SQLite
 WAL is intended for one machine, not a shared network filesystem.
 
-Every enabled call reports hit/miss and the cumulative fraction served from
-cache to stderr. These are response counts, not token or cost savings. A bypass
+Every enabled call counts hit/miss and the cumulative fraction served from
+cache. Console reporting is off by default; use `report=True` to enable summaries
+on stderr. These are response counts, not token or cost savings. A bypass
 or failed upstream call is not a hit. Production bypasses emit no cache metrics.
 `cache_stats()` returns these process-local counters; `cached-response --path
 PATH` reports persistent entry count and size without displaying prompts.
+
+## Miss diagnostics
+
+`cache_stats()` returns aggregate process-wide counts for both decorators:
+`requests`, `hit`, `miss`, `cache_hit_percent`, `cache_miss_percent`, and
+`miss_reasons`. Disabled calls and `use_cache=False` are excluded. A miss counts
+the lookup decision, even if the subsequent upstream call fails.
+
+With `diagnostics=True` (default), LLM misses also contribute:
+
+| Field | Meaning |
+| --- | --- |
+| `diagnosed_misses` | Misses with diagnostic collection enabled. |
+| `misses_with_candidates` | Requests where at least one candidate was found. |
+| `near_misses` | Missed requests with at least one candidate at or above `near_miss_threshold` (default `0.90`). |
+| `candidates_missed` | Total candidates described across those requests. |
+| `candidate_rejections` | Counts by each candidate's final rejection reason. |
+| `miss_prompt` | Sample count and total, min, max, mean for characters, UTF-8 bytes, words, symbols, digits, and lines. |
+
+Prompt statistics count string values in message contents (or string arguments
+for other call shapes). They exclude JSON framing, role labels, tool schemas,
+and protected provider signature fields. Words are whitespace-separated;
+symbols are Unicode punctuation and symbol characters, including emoji.
+Characters are Python Unicode code points, not model tokens. Misses whose input
+cannot be decoded may lack prompt measurements, so use `miss_prompt.count` as
+the measurement denominator. Metrics with no events may be absent or zero.
+
+`cache_misses(limit=5)` returns independent copies of recent LLM miss examples,
+newest first, from a bounded 20-entry process-local buffer. Each includes the
+request key, miss reason, prompt measurements, and candidate details. Both APIs
+are also available as `your_decorated_function.cache_stats()` and `.cache_misses()`;
+they combine all decorated functions in that process. Nothing prints by default.
+Set `diagnostics=False` to skip collection and extra candidate scans; basic
+hit/miss counts remain available. Restarting the process resets counters and
+examples; the CLI reads storage size, not these runtime metrics.
+
+Candidate examples show their storage key, age, `signature_similarity`,
+`high_similarity`, rejection `checks`, prompt sizes, and at most 12 structural
+differences. Each difference includes its path, character lengths, edit offset,
+and before/after excerpts capped at 160 characters. Default redaction preserves
+the first four and last four characters of each excerpt, replaces interior
+letters and numbers with `*`, and keeps spaces, dashes, punctuation, and other
+symbols. For example, `abcd-Alice 1234-wxyz` becomes `abcd-***** ****-wxyz`.
+Strings of eight characters or fewer remain visible because the preserved edges
+cover the whole string. Unknown field names and verifier explanations use the
+same redaction; long values are capped at 160 characters while retaining their
+last four characters. Explicit `diagnostic_text=True` on the decorator or `configure()`
+allows raw excerpts and verifier explanations in new examples and logs. It does
+not retroactively change retained examples. Exception diagnostics contain error
+types only, with no exception messages or tracebacks.
+
+Candidate lookup considers at most eight recent indexed entries in the same
+function, namespace, mode, rules, and HTTP identity. Chat requests also require
+matching model settings, tools, and message roles. Non-chat argument shapes use
+the function scope. This is a bounded investigation of nearby entries, not a
+full-database search; older entries without a candidate index may not appear.
+Candidates skipped by an early verifier rejection are not all evaluated.
+
+The similarity signature uses character-trigram Dice overlap of normalized JSON,
+penalized for differences in total length. For inputs over 65,536 characters,
+only the first and last 32,768 characters are sampled and `signature_sampled`
+is true. It is a heuristic overlap score, never a probability of correctness or
+permission to reuse. Shared context can dominate the score while a short changed
+instruction makes reuse unsafe. A `near_miss` is a candidate for investigation,
+not proof of a lost safe cache hit. Cache hashes themselves have no similarity
+interpretation, and opaque provider signatures are not treated as confidence.
+
+The request reason `cold` means its exact normalized key was absent. Candidate
+reasons explain why other entries were missed: `verification_disabled`,
+`validator_rejected`, `validator_error`, `proposal_rejected` (with a fixed
+explanation such as `Provider state changed`), `change_fraction_too_large`,
+`output_references_changed_value`, `verifier_rejected`, `invalid_verdict`,
+`verifier_error`, `verifier_input_too_large`, `refresh`, or decoding/rebinding
+failures. Saved-rule checks also expose guard and shape mismatches. Masking a
+free-text verifier explanation retains the machine-readable rejection reason.
+Rebinding failures include `previous_reference_count`, `current_reference_count`,
+and `reference_structure_matches` to explain changed identifier relationships
+without logging identifier values.
+
+Optional logging is confined to the package:
+
+```python
+from cached_response import configure_logging
+
+configure_logging(path="cache_diagnostics.log")  # Only a file
+configure_logging(console=True)                 # Switch to console
+configure_logging(enabled=False)                # Close helper-owned handlers
+```
+
+The helper replaces only its own handlers; application-installed handlers on
+`cached_response` are preserved. The package uses a `NullHandler` and disables
+propagation to root by default. It never calls `basicConfig`, changes the root
+level, or configures third-party loggers. Applications can instead attach their
+own handler directly to `logging.getLogger("cached_response")` and set its level.
+Diagnostic records include a JSON object in the message and the same object in
+`LogRecord.cache_diagnostic` for structured handlers. HTTP verifier metadata
+contains sizes and timing, with no raw request or response.
+
+Only explicitly enabled file logs persist diagnostics. The SQLite response cache
+still stores original inputs/results needed for matching and replay; diagnostic
+redaction does not encrypt or redact that database.
+
+## Refresh behavior
 
 Refresh starts probabilistically after one day and becomes mandatory after seven
 days, measured since successful generation. Between those ages the probability
