@@ -122,7 +122,7 @@ def test_meaningful_changes_miss(monkeypatch, mode, before, after):
     ask(body(after))
     assert len(calls) == 2
 
-    assert len(judges) == int(mode == "testing" and before == "503")
+    assert len(judges) == int(mode in ("testing", "risky") and before == "503")
 
 
 def test_testing_handles_execution_ids_and_metadata(monkeypatch):

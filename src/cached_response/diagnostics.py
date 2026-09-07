@@ -216,11 +216,32 @@ class MissDiagnostic:
                 scope, MAX_CANDIDATES
             ):
                 self.observe(key, created, payload)
+
+                def roles(value):
+                    if not isinstance(value, dict):
+                        return None
+                    messages = value.get("messages")
+                    if not isinstance(messages, list) or not all(
+                        isinstance(message, dict) for message in messages
+                    ):
+                        return None
+                    return [message.get("role") for message in messages]
+
+                old_roles = roles(payload.get("input"))
+                new_roles = roles(self.body)
+                if old_roles != new_roles:
+                    self.reject(
+                        key,
+                        "message_role_sequence_changed",
+                        previous_message_count=len(old_roles),
+                        current_message_count=len(new_roles),
+                    )
+                    continue
                 self.reject(
                     key,
                     "verification_disabled"
                     if (
-                        self.config.mode != "testing"
+                        self.config.mode not in ("testing", "risky")
                         or not self.config.learning
                     )
                     else "verification_unavailable",

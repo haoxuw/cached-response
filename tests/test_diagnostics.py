@@ -146,8 +146,8 @@ def test_verifier_miss_example_stats_and_file_are_redacted(tmp_path, capsys):
         ("verifier_error", "verifier_error"),
         ("invalid", "invalid_verdict"),
         ("references", "output_references_changed_value"),
-        ("proportion", "change_fraction_too_large"),
-        ("structure", "proposal_rejected"),
+        ("proportion", "pair_instruction_or_control_changed"),
+        ("structure", "pair_instruction_or_control_changed"),
         ("refresh", "refresh"),
     ],
 )
@@ -245,7 +245,7 @@ def test_rebinding_miss_explains_changed_identifier_relationships(tmp_path):
     new = request("07", user="Inspect job_ef56ab78 and job_0123abcd")
     ask(old)
     ask(new)
-    check = cache_misses(1)[0]["candidates"][0]["checks"][-1]
+    check = cache_misses(1)[0]["candidates"][0]["checks"][0]
     assert check == {
         "reason": "rebind_failed",
         "error": "ValueError",

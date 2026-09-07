@@ -11,7 +11,7 @@ import pytest
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "minimal"
 
 
-@pytest.mark.parametrize("example", ["exact.py", "llm.py"])
+@pytest.mark.parametrize("example", ["exact.py", "llm.py", "input_pair.py"])
 def test_minimal_decorator_example(example, tmp_path):
     environment = {
         **os.environ,

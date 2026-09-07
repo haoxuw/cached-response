@@ -218,14 +218,16 @@ def prepare(body, scope, config, llm, verifier=None):
         diagnostic.learned = learned
     learning_scope = (
         learning.scope_key(scope, body, config)
-        if llm and config.mode == "testing" and config.learning
+        if llm and config.mode in ("testing", "risky") and config.learning
         else None
     )
     diagnostic_scope = (
         digest(
             {
                 "diagnostics": 1,
-                "scope": learning.scope_key(scope, body, config)
+                "scope": learning.scope_key(
+                    scope, body, config, include_roles=False
+                )
                 or {
                     "scope": scope,
                     "mode": config.mode,
@@ -327,11 +329,12 @@ def prepare(body, scope, config, llm, verifier=None):
                         diagnostic=diagnostic,
                     )
                     if result is not None:
+                        result, reuse_reason = result
                         adapters.unpack(result)
                         # Keep the original entry's age for learned reuse: a new
                         # input must not renew an old answer's freshness window.
                         store.release(key, owner)
-                        decision("hit", "verified_rule", config, key)
+                        decision("hit", reuse_reason, config, key)
                         return None, result
                 except BaseException:
                     store.release(key, owner)
@@ -490,7 +493,7 @@ def decorate(function, llm, overrides, version):
             verifier is None
             and llm
             and config.learning
-            and config.mode == "testing"
+            and config.mode in ("testing", "risky")
         ):
             verifier = functools.partial(
                 adapters.verify_function, function, args, kwargs, body
@@ -538,7 +541,7 @@ def decorate(function, llm, overrides, version):
             llm
             and verifier is None
             and config.learning
-            and config.mode == "testing"
+            and config.mode in ("testing", "risky")
         ):
             loop = asyncio.get_running_loop()
 

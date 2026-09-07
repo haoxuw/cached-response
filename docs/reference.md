@@ -12,8 +12,8 @@ async def ask_llm(request):
 | --- | --- |
 | `disabled` (default) | No caching or normalization. |
 | `conservative` | UUIDs, ISO date-time strings, and long identifiers containing many symbols. |
-| `testing` | Also prefixed hexadecimal identifiers and recognized provider tool-call IDs. Can ask the existing HTTP model endpoint to approve additional normalization rules. |
-| `risky` | Also automatically discovered shapes of rare tokens containing both letters and digits. Learned patterns are reused automatically. |
+| `testing` | Also prefixed hexadecimal identifiers and recognized provider tool-call IDs. Can ask the existing model to approve scoped normalization rules or a concrete input pair. |
+| `risky` | Also automatically discovered shapes of rare tokens containing both letters and digits, plus the verification paths available in testing. Learned patterns are reused automatically. |
 
 Numeric values stay exact until an explicit rule is approved in testing mode;
 names such as `created_at` or `run_id` do not authorize ignoring their values.
@@ -119,7 +119,10 @@ types only, with no exception messages or tracebacks.
 
 Candidate lookup considers at most eight recent indexed entries in the same
 function, namespace, mode, rules, and HTTP identity. Chat requests also require
-matching model settings, tools, and message roles. Non-chat argument shapes use
+matching model settings and tools. Reuse requires matching message roles; when
+that group has no candidates, diagnostics can inspect nearby role sequences and
+report `message_role_sequence_changed` with both message counts. This observation
+does not authorize cross-sequence reuse. Non-chat argument shapes use
 the function scope. This is a bounded investigation of nearby entries, not a
 full-database search; older entries without a candidate index may not appear.
 Candidates skipped by an early verifier rejection are not all evaluated.
@@ -228,7 +231,7 @@ normalization at those positions, so keep them narrow. An optional synchronous
 causes a miss. It can call an LLM if the caller chooses, but that adds inference
 cost and cannot prove equivalence.
 
-Testing mode includes a default verification prompt and can learn small rules on
+Testing and risky modes include a default verification prompt and can learn small rules on
 an exact-cache miss. For HTTP chat-completion handlers it reuses the undecorated
 handler. For sync or async Python functions taking one chat-request dictionary
 with a `messages` list, it reuses the undecorated function. The verification request
@@ -259,15 +262,45 @@ async def ask_llm(request):
     return await existing_model_call(request)
 ```
 
-The prototype considers at most eight recent entries with matching function,
-HTTP identity, model settings, tools, and message roles. It proposes only small
-numeric or generated-looking line changes and makes at most one verifier call
-per lookup. Learned rules keep an exact hash of everything outside their approved
+The verification paths consider at most eight recent entries with matching function,
+HTTP identity, model settings, tools, and message roles. Rule learning proposes small numeric or generated-looking line changes. Both
+paths together make at most one verifier call per lookup. Learned rules keep an exact hash of everything outside their approved
 spans and are tied to the original cached input and response. They do not ignore
 arbitrary task history or changed provider state. Values learned by this path
 are ignored only when they are not detected in the returned response; the
 prototype does not rewrite those learned values. Existing identifier rebinding
 still applies.
+
+If ordinary rebinding or rule proposal rejects a candidate, a separate **input-pair
+review** can handle changed tool/assistant content and additional identifiers.
+Identifiers are aligned by their complete structured paths and local occurrence
+positions, preserving reference types. An old identifier without an unambiguous
+mapping must not occur in the cached response. The verifier sees the complete old
+and new inputs, the original response, and the rebound response; it must reject
+changed targets, meaningful facts, stale answers, or uncertainty. This is model
+judgment for tests, not a guarantee of semantic equivalence.
+
+This path preserves system/user instructions and non-content controls after
+identifier alignment, opaque provider state, object keys, value types, and list
+lengths (including JSON embedded in tool text). It does not discard events,
+ignore arbitrary history, or reuse across different message-role sequences.
+Decoded tool/assistant content can change within that structure, including
+multiline text. Unstructured text still requires semantic review in full.
+
+Its evidence has `verification_kind="input_pair"`, `old_input`, `new_input`,
+`original_cached_response`, `cached_response`, and numeric `reference_alignment`
+details. `proposed_changes` is empty: no regex is being authorized. Approval
+returns a `verified_pair` hit only for this lookup; it persists no learned rule
+and must be obtained again even for the same pair. The total verifier-input
+limit is 300,000 characters. Rejection, invalid output, timeout, or input beyond
+that bound causes a miss. `learning=False` disables both verification paths;
+conservative and disabled modes never use them.
+
+Diagnostics retain the original failure and the subsequent pair rejection, such
+as `unmapped_output_reference`, `pair_sequence_changed`,
+`pair_instruction_or_control_changed`, or `pair_provider_state_changed`, with
+redacted field paths. `normalization_state_changed` rejects candidates whose
+stored bindings cannot be reconstructed, including changed risky-mode patterns.
 
 Python generates anchored regexes with literal punctuation, observed character
 classes, and observed length bounds. For example, a changing five-character
@@ -299,7 +332,7 @@ and custom overrides need a timeout in their own model client. A failed or
 uncertain verification falls back to normal inference.
 Expired answers stay expired; learning does not renew their age. Changing a
 verifier's policy should also change the decorator's `version=` or `namespace=`.
-This experimental path currently runs only in `testing` mode.
+These experimental verification paths run in `testing` and `risky` modes.
 
 An approving model can be wrong. Exact equality outside a learned rule does not
 prove that future values inside that rule are harmless. The verifier itself

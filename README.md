@@ -28,12 +28,18 @@ by default.
 | --- | --- |
 | `disabled` (default) | Always calls your function. Keep this in production. |
 | `conservative` | Matches some changing UUIDs, timestamps, and generated IDs. |
-| `testing` | Matches more ID formats and supports LLM-approved matching rules. |
-| `risky` | Also learns patterns from rare generated-looking words. |
+| `testing` | Matches more ID formats and supports LLM-approved rules and input-pair review. |
+| `risky` | Adds rare-token patterns and includes testing-mode verification. |
 
 ### Learning and optional override
 
-Testing mode includes a verification prompt. For a function taking one chat-request
+When identifier sets or tool-result text differ, a verifier can approve a specific
+input pair without learning a broader rule. List structure, instructions, provider
+state, and output-reference checks still apply. Pair approvals are checked again
+on every lookup; `learning=False` disables verification. See the
+[matching reference](docs/reference.md) for the boundaries and cost.
+
+Testing and risky modes include verification prompts. For a function taking one chat-request
 dictionary with `messages`, the package uses your existing model function to
 check whether a proposed matching rule is safe. Supported HTTP handlers work too.
 Approved rules are saved; later matches need no extra judge call. No prompt or
