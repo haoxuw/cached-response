@@ -14,10 +14,13 @@ def request(day):
             {
                 "role": "system",
                 "content": "Use the supplied context to inspect current state. "
-                * 15
-                + f"\nConversation started: September {day}, 2026\n",
+                * 15,
             },
             {"role": "user", "content": "Inspect alice@example.com's task."},
+            {
+                "role": "tool",
+                "content": f"Conversation started: September {day}, 2026",
+            },
         ],
     }
 

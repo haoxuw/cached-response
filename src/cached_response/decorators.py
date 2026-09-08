@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
-from . import adapters, learning, signatures
+from . import adapters, matching, signatures
 from .config import refresh_probability, settings
 from .diagnostics import (
     MissDiagnostic,
@@ -31,7 +31,7 @@ from .storage import get_store
 
 LOGGER = logging.getLogger("cached_response")
 POLL_INTERVAL = 0.05
-FORMAT_VERSION = 4
+FORMAT_VERSION = 5
 MARSHAL_VERSION = (
     2  # Avoid reference-sharing flags changing after introspection.
 )
@@ -137,17 +137,15 @@ class Ticket:
         body,
         normalized,
         config,
-        learning_scope=None,
+        matching_scope=None,
         diagnostic_scope=None,
         signature_info=None,
-        structural_scope=None,
     ):
         self.store, self.key, self.owner = store, key, owner
         self.body, self.normalized, self.config = body, normalized, config
-        self.learning_scope = learning_scope
+        self.matching_scope = matching_scope
         self.diagnostic_scope = diagnostic_scope
         self.signature_info = signature_info
-        self.structural_scope = structural_scope
 
     def release(self):
         try:
@@ -168,15 +166,13 @@ class Ticket:
             )
             if len(payload.encode()) <= self.config.max_entry_bytes:
                 self.store.put(self.key, self.owner, payload)
-                if self.learning_scope:
-                    self.store.index(self.learning_scope, self.key)
-                if self.structural_scope:
-                    self.store.index(self.structural_scope, self.key)
+                if self.matching_scope:
+                    self.store.index(self.matching_scope, self.key)
                 if self.signature_info:
                     self.store.index_signatures(*self.signature_info, self.key)
                 if (
                     self.diagnostic_scope
-                    and self.diagnostic_scope != self.learning_scope
+                    and self.diagnostic_scope != self.matching_scope
                 ):
                     self.store.index(self.diagnostic_scope, self.key)
         except Exception as exc:
@@ -197,7 +193,13 @@ def prepare(body, scope, config, llm, verifier=None):
     if llm and config.signature_matching:
         store = get_store(str(config.path))
         signature_info = (
-            learning.scope_key(scope, body, config) or digest(scope),
+            matching.scope_key(
+                scope,
+                body,
+                config,
+                include_roles=not config.structural_matching,
+            )
+            or digest(scope),
             signatures.fingerprints(body),
         )
 
@@ -227,24 +229,15 @@ def prepare(body, scope, config, llm, verifier=None):
         return None, None
     if store is None:
         store = get_store(str(config.path))
-    model_settings = (
-        {k: v for k, v in body.items() if k != "messages"}
-        if isinstance(body, dict)
-        else {}
-    )
-    rule_scope = digest({"function": scope, "settings": model_settings})
-    learned = (
-        store.learned(rule_scope) if llm and config.mode == "risky" else ()
-    )
     normalized = (
-        normalize(body, config.mode, config.rules, learned)
+        normalize(body, config.mode, config.rules)
         if llm
-        else Normalized(body, {}, [])
+        else Normalized(body, {})
     )
-    if diagnostic is not None:
-        diagnostic.learned = learned
-    learning_scope = (
-        learning.scope_key(scope, body, config)
+    matching_scope = (
+        matching.scope_key(
+            scope, body, config, include_roles=not config.structural_matching
+        )
         if llm and config.mode in ("testing", "risky") and config.learning
         else None
     )
@@ -252,7 +245,7 @@ def prepare(body, scope, config, llm, verifier=None):
         digest(
             {
                 "diagnostics": 1,
-                "scope": learning.scope_key(
+                "scope": matching.scope_key(
                     scope, body, config, include_roles=False
                 )
                 or {
@@ -265,30 +258,16 @@ def prepare(body, scope, config, llm, verifier=None):
         if diagnostic is not None
         else None
     )
-    structural_scope = (
-        digest(
-            {
-                "structural": 1,
-                "scope": learning.scope_key(
-                    scope, body, config, include_roles=False
-                ),
-            }
-        )
-        if learning_scope and config.structural_matching
-        else None
-    )
     key = digest(
         {
             "format": FORMAT_VERSION,
             "scope": scope,
             "mode": config.mode if llm else "exact",
             "rules": [asdict(rule) for rule in config.rules],
-            "learning": bool(learning_scope),
+            "learning": bool(matching_scope),
             "input": normalized.body,
         }
     )
-    if normalized.learned:
-        store.learn(rule_scope, normalized.learned)
     owner, deadline = uuid.uuid4().hex, time.monotonic() + config.wait_seconds
     random_draw = random.random()
     while True:
@@ -356,11 +335,11 @@ def prepare(body, scope, config, llm, verifier=None):
             if latest != entry:
                 store.release(key, owner)
                 continue
-            if entry is None and learning_scope and verifier:
+            if entry is None and matching_scope and verifier:
                 try:
-                    result = learning.lookup(
+                    result = matching.lookup(
                         store,
-                        learning_scope,
+                        matching_scope,
                         body,
                         normalized,
                         config,
@@ -369,12 +348,11 @@ def prepare(body, scope, config, llm, verifier=None):
                         fingerprints=signature_info[1]
                         if signature_info
                         else None,
-                        structural_scope=structural_scope,
                     )
                     if result is not None:
                         result, reuse_reason = result
                         adapters.unpack(result)
-                        # Keep the original entry's age for learned reuse: a new
+                        # Keep the original entry's age for pair reuse: a new
                         # input must not renew an old answer's freshness window.
                         store.release(key, owner)
                         record("hit", reuse_reason, config, key)
@@ -400,10 +378,9 @@ def prepare(body, scope, config, llm, verifier=None):
                 body,
                 normalized,
                 config,
-                learning_scope,
+                matching_scope,
                 diagnostic_scope,
                 signature_info,
-                structural_scope,
             ), None
         if time.monotonic() >= deadline:
             miss("busy", key)

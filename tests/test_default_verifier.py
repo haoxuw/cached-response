@@ -6,25 +6,15 @@ import json
 import pytest
 
 from cached_response import cached_llm_response
-from cached_response.learning import INSTRUCTION
+from cached_response.matching import INSTRUCTION
 
 
-def request(day):
-    return {
-        "model": "test",
-        "messages": [
-            {
-                "role": "system",
-                "content": "Inspect current state without making changes. " * 25
-                + f"\nConversation started: Monday, September {day}, 2026 (UTC)\n",
-            }
-        ],
-    }
+from test_matching import request
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("response_kind", ["dict", "text", "chat"])
-def test_default_prompt_learns_once(tmp_path, asynchronous, response_kind):
+def test_default_prompt_reviews_each_pair(tmp_path, asynchronous, response_kind):
     calls, judges = [], []
 
     def model(body):
@@ -57,11 +47,11 @@ def test_default_prompt_learns_once(tmp_path, asynchronous, response_kind):
     else:
         for day in ("07", "08", "09"):
             assert cached(request(day)) == "Inspect the current state."
-    assert len(calls) == len(judges) == 1
+    assert len(calls) == 1 and len(judges) == 2
     assert judges[0]["messages"][0]["content"] == INSTRUCTION
     evidence = json.loads(judges[0]["messages"][1]["content"])
     assert evidence["new_input"] == request("08")
-    assert evidence["proposed_changes"]
+    assert evidence["old_input"] == request("07")
 
 
 @pytest.mark.parametrize(

@@ -122,7 +122,7 @@ def test_meaningful_changes_miss(monkeypatch, mode, before, after):
     ask(body(after))
     assert len(calls) == 2
 
-    assert len(judges) == int(mode in ("testing", "risky") and before == "503")
+    assert not judges
 
 
 def test_testing_handles_execution_ids_and_metadata(monkeypatch):
@@ -353,7 +353,7 @@ assert compute(3) == {'value': 3}
     assert marker.read_text() == "called\n"
 
 
-def test_risky_learns_scoped_patterns(monkeypatch, tmp_path):
+def test_risky_does_not_guess_identifier_patterns(monkeypatch, tmp_path):
     monkeypatch.setenv("CACHED_RESPONSE_MODE", "risky")
     import sqlite3
     calls = []
@@ -365,6 +365,6 @@ def test_risky_learns_scoped_patterns(monkeypatch, tmp_path):
 
     ask(body("abcd1234"))
     ask(body("efgh5678"))
-    assert len(calls) == 1
+    assert len(calls) == 2
     with sqlite3.connect(tmp_path / "private" / "cache.sqlite3") as db:
-        assert db.execute("SELECT COUNT(*) FROM rules").fetchone()[0] > 0
+        assert db.execute("SELECT count(*) FROM sqlite_master WHERE name='rules'").fetchone()[0] == 0

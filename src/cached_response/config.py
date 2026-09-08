@@ -75,7 +75,6 @@ class Config:
         default=None, compare=False, repr=False
     )
     verifier_timeout: float = 90
-    learning_recheck: float = 0
 
     def __post_init__(self):
         if self.signature_matching and self.mode != "disabled":
@@ -106,10 +105,8 @@ class Config:
             <= 0
         ):
             raise ValueError("Size and timeout limits must be positive")
-        if self.verifier_timeout <= 0 or not 0 <= self.learning_recheck <= 1:
-            raise ValueError(
-                "Require verifier_timeout > 0 and learning_recheck between 0 and 1"
-            )
+        if self.verifier_timeout <= 0:
+            raise ValueError("Require verifier_timeout > 0")
 
 
 _config = Config()

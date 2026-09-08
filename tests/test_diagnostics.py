@@ -25,7 +25,7 @@ from cached_response import decorators, diagnostics
 from cached_response.config import Config
 from cached_response.diagnostics import differences, prompt_stats, redact
 from cached_response.storage import get_store
-from test_learning import request
+from test_matching import request
 
 
 @pytest.fixture(autouse=True)
@@ -120,7 +120,7 @@ def test_verifier_miss_example_stats_and_file_are_redacted(tmp_path, capsys):
     candidate = example["candidates"][0]
     assert candidate["reason"] == "verifier_rejected"
     assert candidate["high_similarity"]
-    assert candidate["differences"][0]["path"] == ["messages", 0, "content"]
+    assert candidate["differences"][0]["path"] == ["messages", 2, "content"]
     assert "*" in candidate["differences"][0]["before"]
     assert " " in candidate["differences"][0]["before"]
     assert candidate["checks"][-1]["verifier_reason"] == (
@@ -154,7 +154,7 @@ def test_verifier_miss_example_stats_and_file_are_redacted(tmp_path, capsys):
         ("validator_error", "validator_error"),
         ("verifier_error", "verifier_error"),
         ("invalid", "invalid_verdict"),
-        ("references", "output_references_changed_value"),
+        ("references", "unmapped_output_reference"),
         ("proportion", "pair_instruction_or_control_changed"),
         ("structure", "pair_instruction_or_control_changed"),
         ("refresh", "refresh"),
@@ -175,9 +175,11 @@ def test_candidate_rejection_reasons(tmp_path, case, expected):
 
     @cached_llm_response(**options)
     def ask(body):
-        return "The day is 07." if case == "references" else "inspect"
+        return "Inspect job_ab12cd34." if case == "references" else "inspect"
 
     before, after = request("07"), request("08")
+    if case == "references":
+        before["messages"][-1]["content"] += " job_ab12cd34"
     if case == "proportion":
         before, after = (
             request("07", user="1"),
@@ -255,13 +257,9 @@ def test_rebinding_miss_explains_changed_identifier_relationships(tmp_path):
     ask(old)
     ask(new)
     check = cache_misses(1)[0]["candidates"][0]["checks"][0]
-    assert check == {
-        "reason": "rebind_failed",
-        "error": "ValueError",
-        "previous_reference_count": 1,
-        "current_reference_count": 2,
-        "reference_structure_matches": False,
-    }
+    assert check['reason'] == 'pair_instruction_or_control_changed'
+    assert check['path'] == ['messages', 1, 'content']
+
 
 
 def test_examples_bounded_and_raw_text_is_explicit(tmp_path):

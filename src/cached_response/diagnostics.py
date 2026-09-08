@@ -201,7 +201,6 @@ class MissDiagnostic:
         self.body = body
         self.config = config
         self.candidates = {}
-        self.learned = ()
 
     def observe(self, key, created, payload):
         self.candidates[key] = {
@@ -272,9 +271,7 @@ class MissDiagnostic:
             }
             try:
                 old = candidate["payload"]["input"]
-                previous = normalize(
-                    old, self.config.mode, self.config.rules, self.learned
-                )
+                previous = normalize(old, self.config.mode, self.config.rules)
                 old_signature = signature(previous.body)
                 score = similarity(current_signature, old_signature)
                 changes, truncated = differences(
@@ -301,9 +298,7 @@ class MissDiagnostic:
             item.get("high_similarity", False) for item in result["candidates"]
         )
         result["candidate_limit"] = MAX_CANDIDATES * (
-            3
-            if self.config.signature_matching or self.config.structural_matching
-            else 1
+            3 if self.config.signature_matching else 1
         )
         result["near_miss_threshold"] = self.config.near_miss_threshold
         return result

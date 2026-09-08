@@ -4,9 +4,9 @@ import json
 import pytest
 
 from cached_response import cache_misses, cached_llm_response
-from cached_response.learning import STATE_KEYS, reference_view
+from cached_response.matching import reference_view
 from cached_response.normalize import normalize
-from cached_response.pairwise import PairRejected, prepare
+from cached_response.matching import PairRejected, prepare
 from cached_response.storage import get_store
 
 
@@ -21,7 +21,7 @@ def request(target='job_ab12cd34', note='No trace.', **data):
 def prepared(before, after, result):
     old, old_bindings = reference_view(normalize(before, 'testing'))
     new, new_bindings = reference_view(normalize(after, 'testing'))
-    return prepare(old, new, old_bindings, new_bindings, result, STATE_KEYS)
+    return prepare(old, new, old_bindings, new_bindings, result)
 
 
 @pytest.mark.parametrize('mode', ['testing', 'risky'])
@@ -49,7 +49,7 @@ def test_extra_reference_requires_pair_approval_and_rebinds_response(tmp_path, m
     assert judges[0]['reference_alignment']['unmapped_current_reference_count'] == 1
     # This approval must not create a shape rule or silently cover another pair.
     with get_store(str(tmp_path / 'cache.db')).connect() as db:
-        assert db.execute('SELECT count(*) FROM verified_rules').fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM sqlite_master WHERE name='verified_rules'").fetchone()[0] == 0
     ask(after)
     assert len(judges) == 2
     assert len(calls) == 1
@@ -185,7 +185,7 @@ def test_opaque_signature_in_tool_text_never_reaches_pair_review():
 @pytest.mark.parametrize('mode', ['testing', 'risky'])
 def test_builtin_pair_verifier_uses_existing_function(tmp_path, asynchronous, mode):
     import asyncio
-    from cached_response.learning import PAIR_INSTRUCTION
+    from cached_response.matching import INSTRUCTION
     calls, judges = [], []
     def model(body):
         if body.get('response_format') == {'type': 'json_object'}:
@@ -208,7 +208,7 @@ def test_builtin_pair_verifier_uses_existing_function(tmp_path, asynchronous, mo
         answer = ask(after)
     assert answer == 'inspect current state'
     assert len(calls) == len(judges) == 1
-    assert judges[0]['messages'][0]['content'] == PAIR_INSTRUCTION
+    assert judges[0]['messages'][0]['content'] == INSTRUCTION
     evidence = json.loads(judges[0]['messages'][1]['content'])
     assert evidence['old_input'] == before
     assert evidence['new_input'] == after
@@ -230,7 +230,7 @@ def test_validator_rejection_blocks_pair_review(tmp_path):
 
 
 def test_pair_review_is_bounded_and_does_not_log_exception_text(tmp_path, monkeypatch):
-    from cached_response import learning
+    from cached_response import matching
     calls, judges = [], []
     def verifier(e):
         judges.append(e)
@@ -244,7 +244,7 @@ def test_pair_review_is_bounded_and_does_not_log_exception_text(tmp_path, monkey
     ask(request(note='Trace trace_0123abcd'))
     assert len(judges) == 1
     assert 'private-person@example.com' not in json.dumps(cache_misses(1))
-    monkeypatch.setattr(learning, 'MAX_JUDGE_CHARS', 1)
+    monkeypatch.setattr(matching, 'MAX_JUDGE_CHARS', 1)
     ask(request(note='Different trace trace_5678abcd detail.'))
     assert len(judges) == 1
     assert len(calls) == 3

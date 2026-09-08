@@ -21,7 +21,7 @@ results because the local database persists.
   the default 100-word minimum.
 
 `cached_staticmethod` is enabled without a mode. The LLM example explicitly
-selects testing mode; LLM caching is disabled by default. See the [learning hook tutorial](../../README.md#learning-and-optional-override)
+selects testing mode; LLM caching is disabled by default. See the [matching and verifier guide](../../README.md#matching-in-three-rules)
 for connecting your own judge model.
 
 Run `python examples/minimal/miss_diagnostics.py` for a fresh, isolated run that

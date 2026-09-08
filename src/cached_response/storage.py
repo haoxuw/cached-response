@@ -10,14 +10,10 @@ from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 
-from .config import Rule
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entries (key TEXT PRIMARY KEY, created REAL NOT NULL, payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS leases (key TEXT PRIMARY KEY, owner TEXT NOT NULL, expires REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS rules (scope TEXT NOT NULL, rule TEXT NOT NULL, PRIMARY KEY(scope, rule));
 CREATE TABLE IF NOT EXISTS candidates (scope TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(scope, key));
-CREATE TABLE IF NOT EXISTS verified_rules (key TEXT NOT NULL, rule TEXT NOT NULL, PRIMARY KEY(key, rule));
 CREATE TABLE IF NOT EXISTS signature_counts (scope TEXT NOT NULL, kind TEXT NOT NULL, signature TEXT NOT NULL, requests INTEGER NOT NULL, hits INTEGER NOT NULL, misses INTEGER NOT NULL, first_seen REAL NOT NULL, last_seen REAL NOT NULL, PRIMARY KEY(scope, kind, signature));
 CREATE TABLE IF NOT EXISTS signature_entries (scope TEXT NOT NULL, kind TEXT NOT NULL, signature TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(scope, kind, key));
 CREATE INDEX IF NOT EXISTS signature_lookup ON signature_entries(scope, kind, signature);
@@ -94,33 +90,6 @@ class Store:
                 "DELETE FROM leases WHERE key=? AND owner=?", (key, owner)
             )
 
-    def learned(self, scope):
-        with self.connect() as db:
-            rows = db.execute(
-                "SELECT rule FROM rules WHERE scope=? ORDER BY rule", (scope,)
-            ).fetchall()
-        return [Rule(**json.loads(row[0])) for row in rows]
-
-    def learn(self, scope, rules):
-        with self.connect() as db:
-            db.executemany(
-                "INSERT OR IGNORE INTO rules VALUES (?, ?)",
-                [
-                    (
-                        scope,
-                        json.dumps(
-                            {
-                                "name": r.name,
-                                "pattern": r.pattern,
-                                "paths": r.paths,
-                            },
-                            sort_keys=True,
-                        ),
-                    )
-                    for r in rules
-                ],
-            )
-
     def index(self, scope, key):
         with self.connect() as db:
             db.execute(
@@ -138,13 +107,6 @@ class Store:
             (key, created, json.loads(payload))
             for key, created, payload in rows
         ]
-
-    def verified(self, key):
-        with self.connect() as db:
-            rows = db.execute(
-                "SELECT rule FROM verified_rules WHERE key=?", (key,)
-            ).fetchall()
-        return [json.loads(row[0]) for row in rows]
 
     def count_signatures(self, scope, signatures, hit):
         now = time.time()
@@ -197,20 +159,6 @@ class Store:
             )
             columns = [column[0] for column in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
-
-    def approve(self, key, rule):
-        with self.connect() as db:
-            db.execute(
-                "INSERT OR IGNORE INTO verified_rules VALUES (?, ?)",
-                (key, json.dumps(rule, sort_keys=True)),
-            )
-
-    def revoke(self, key, rule):
-        with self.connect() as db:
-            db.execute(
-                "DELETE FROM verified_rules WHERE key=? AND rule=?",
-                (key, json.dumps(rule, sort_keys=True)),
-            )
 
 
 @lru_cache(maxsize=32)

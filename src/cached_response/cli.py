@@ -20,7 +20,6 @@ def main():
         entries = db.execute(
             "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) FROM entries"
         ).fetchone()
-        rules = db.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
         signatures = None
         if args.signatures:
             cursor = db.execute(
@@ -33,7 +32,6 @@ def main():
             {
                 "entries": entries[0],
                 "payload_bytes": entries[1],
-                "learned_rules": rules,
                 **(
                     {"signatures": signatures} if signatures is not None else {}
                 ),

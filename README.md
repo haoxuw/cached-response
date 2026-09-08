@@ -28,50 +28,55 @@ by default.
 | --- | --- |
 | `disabled` (default) | Always calls your function. Keep this in production. |
 | `conservative` | Matches some changing UUIDs, timestamps, and generated IDs. |
-| `testing` | Matches more ID formats and supports LLM-approved rules and input-pair review. |
-| `risky` | Adds rare-token patterns and includes testing-mode verification. |
+| `testing` | Matches more ID formats and supports individual pair review. |
+| `risky` | Compatibility mode with the same matching behavior as `testing`. |
 
-### Learning and optional override
+### Matching in three rules
 
-Experimental signature retrieval is opt-in with `signature_matching=True`.
-Install `cached-response[signatures]` and run `python -m nltk.downloader words`
-first. It hashes the fully masked input and a second version preserving
-NLTK-recognized English words, retrieves scoped candidates, then ranks their
-actual differences before the existing reuse checks. Signatures never approve
-a hit. Persistent request/hit/miss counts are available through
-`cache_signatures(path="cache.db")` or `cached-response --path cache.db --signatures`.
+1. Recognize IDs and timestamps, replacing them with placeholders while preserving repeated references.
+2. Reuse matching inputs after checking caller, settings, cache age, and consistent replacements.
+3. Otherwise, check a nearby candidate and ask a verifier; without approval, run the original function.
 
-When identifier sets or tool-result text differ, a verifier can approve a specific
-input pair without learning a broader rule. List structure, instructions, provider
-state, and output-reference checks still apply. Pair approvals are checked again
-on every lookup; `learning=False` disables verification. See the
-[matching reference](docs/reference.md) for the boundaries and cost.
+The code uses regex patterns to recognize UUIDs, ISO timestamps, and some generated
+IDs. Repeated IDs share a placeholder: `A, A` becomes `ID1, ID1`, while `A, B`
+becomes `ID1, ID2`. It hashes this normalized request to look up a saved answer,
+keeping model settings and tool definitions unchanged. On a hit, it replaces old
+IDs and timestamps in the answer with the new values.
 
-For histories with added tool results or repeated ID occurrences, testing/risky
-mode can opt into `structural_matching=True`. It aligns conversation steps and
-requires verification of the complete pair; it never discards added history.
-This option needs no NLTK dependency. Large built-in verifier requests share
-identical JSON sections once, without truncating input. Run
-`python examples/minimal/structural_pairs.py` for a synthetic demonstration.
+**Normalized matches skip the verifier.** This is a shortcut for tests, not proof
+that reuse is safe. For example, changing a certificate's expiry date can wrongly
+reuse an answer saying it has expired.
 
-Testing and risky modes include verification prompts. For a function taking one chat-request
-dictionary with `messages`, the package uses your existing model function to
-check whether a proposed matching rule is safe. Supported HTTP handlers work too.
-Approved rules are saved; later matches need no extra judge call. No prompt or
-hook is required. Unusable replies fall back to a fresh answer.
+After a normalized miss, testing mode checks nearby candidates. Instructions must
+still match after ID mapping; unclear mappings and changed protected provider
+data cause a miss. A verifier then sees both complete inputs and the proposed
+answer. It must approve each reuse; approvals are never saved as general rules.
+The verifier uses your existing model function or HTTP handler.
+`learning=False` disables this review path.
 
-To replace the built-in check, optionally use:
+`structural_matching=True` also considers differing histories and extra ID
+occurrences within the same caller and settings. It uses the same checks and
+verifier. Full histories remain visible; uncertain mappings are rejected.
+Run `python examples/minimal/structural_pairs.py` for a local demonstration.
+
+`signature_matching=True` retrieves candidates by masked and English-word
+signatures. Install `cached-response[signatures]` and run
+`python -m nltk.downloader words` first. Signatures never authorize reuse.
+`cache_signatures(path="cache.db")` shows persistent request/hit/miss counters.
+
+To use a different verifier:
 
 ```python
 @cached_llm_response(mode="testing", verifier_overrider=my_verifier)
 ```
 
-Your override receives the evidence and default instructions. Return a dictionary
-with `safe_to_reuse` (true or false) and `reason` (text). You can change the prompt
-or use another model inside it. [Override example](docs/reference.md#optional-configuration).
+The callback receives full old/new inputs, original/rebound responses, and default
+instructions. Return `{"safe_to_reuse": True, "reason": "..."}` to approve this
+pair. Large built-in requests share identical top-level settings once, including
+tool schemas. No input is truncated; no general-purpose encoding is involved.
 
-Matching can be wrong, and old answers can be stale—such as yesterday's weather.
-Learning also costs model calls. A replay does not test the model again.
+Model approval can be wrong and consumes inference. Measure correctness and
+total model work as well as cache hits. See the [reference](docs/reference.md).
 
 ## cached_staticmethod
 
@@ -115,7 +120,7 @@ Set options directly on either decorator:
 | `namespace="my-app"` | Keep separate applications or users' caches apart. |
 | `version="2"` | Stop reusing old results when a hidden dependency changes. |
 | `min_words=100` | Minimum input length for the LLM decorator only. |
-| `learning=False` | Turn off rule learning for the LLM decorator. |
+| `learning=False` | Turn off model verification for the LLM decorator. |
 | `verifier_overrider=...` | Replace the built-in LLM verification function. |
 
 Between days 1 and 7, the chance of refresh grows evenly: at day 4 it is 50%.

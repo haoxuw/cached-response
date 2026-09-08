@@ -4,10 +4,11 @@ import json
 import pytest
 
 from cached_response import cached_llm_response
-from cached_response import evidence, structural
-from cached_response.learning import STATE_KEYS, reference_view
+from cached_response import matching
+from cached_response.adapters import verification_text
+from cached_response.matching import reference_view
 from cached_response.normalize import dumps, normalize
-from cached_response.pairwise import PairRejected
+from cached_response.matching import PairRejected
 
 
 def request(target='job_ab12cd34', events=None):
@@ -21,17 +22,21 @@ def request(target='job_ab12cd34', events=None):
 def prepare(a,b,result):
     old,ob=reference_view(normalize(a,'testing'))
     new,nb=reference_view(normalize(b,'testing'))
-    return structural.prepare(old,new,ob,nb,result,STATE_KEYS)
+    return matching.prepare(old,new,ob,nb,result, broad=True)
 
 
-def test_evidence_roundtrip_preserves_nested_types_literal_tags_and_nulls():
-    shared={'text':'schema '*1000,'nested':[1,True,1.0,None,{'references':[{'path':[],'shared':0}]}]}
-    source={'old':{'tools':shared},'new':{'tools':copy.deepcopy(shared)},'document':None,'shared':shared}
-    before=dumps(source)
-    packed=evidence.compact(source)
-    assert dumps(evidence.expand(packed))==before
-    assert dumps(source)==before
-    assert len(dumps(packed)) < len(before) - len(dumps(shared)) / 2
+def test_shared_settings_roundtrip_preserves_types_and_literal_fields():
+    shared={'nested':[1,True,1.0,None], 'description':'schema '*16000}
+    old={'messages':[], 'tools':shared, 'shared_input':{'literal':None}}
+    new=copy.deepcopy(old)
+    original={'instruction':'Review.', 'old_input':old, 'new_input':new}
+    before=dumps(original)
+    _,text=verification_text(original)
+    packed=json.loads(text)
+    assert {**packed['shared_input'], **packed['old_input']} == old
+    assert dumps({**packed['shared_input'], **packed['new_input']}) == dumps(new)
+    assert dumps(original)==before
+    assert len(text) < len(before)-len(dumps(shared))/2
 
 
 def test_large_shared_verifier_context_reaches_callback_without_dropping_inputs(tmp_path):
@@ -46,9 +51,10 @@ def test_large_shared_verifier_context_reaches_callback_without_dropping_inputs(
     ask(a);ask(b)
     assert len(calls)==2 and len(judges)==1
     assert judges[0]['old_input']==a and judges[0]['new_input']==b
-    instruction,text=evidence.transport(judges[0])
+    instruction,text=verification_text(judges[0])
     assert len(text)+len(instruction)<300000
-    assert evidence.expand(json.loads(text))['old_input']==a
+    packed=json.loads(text)
+    assert {**packed['shared_input'], **packed['old_input']}==a
 
 
 @pytest.mark.parametrize('mode',['testing','risky'])
@@ -65,7 +71,7 @@ def test_additional_id_occurrences_and_history_require_approval(tmp_path,mode):
     assert ask(b)=={'action':'inspect','target':'job_ef56ab78'}
     assert len(calls)==len(judges)==1
     assert judges[0]['old_input']==a and judges[0]['new_input']==b
-    assert judges[0]['reference_alignment']['added_messages']==[2]
+    assert judges[0]['new_input']['messages'][2]['content']=='A progress note.'
 
 
 @pytest.mark.parametrize('change',['instruction','split','merge','opaque','type','inserted_opaque','unknown_role'])
@@ -117,7 +123,7 @@ def test_tool_results_align_with_their_producing_function():
     new=copy.deepcopy(old)
     new[3:3]=[{'role':'assistant','tool_calls':[{'id':'c','function':{'name':'extra'}}]},
                {'role':'tool','tool_call_id':'c','content':'result'}]
-    assert structural.aligned_messages(old,new)==[(0,0),(1,1),(2,2),(3,5),(4,6)]
+    assert matching.message_pairs(old,new)==[(0,0),(1,1),(2,2),(3,5),(4,6)]
 
 
 @pytest.mark.parametrize('changed_state',[False,True])
@@ -138,6 +144,6 @@ def test_signed_call_ids_preserve_opaque_suffix(changed_state):
 
 def test_alignment_work_is_bounded():
     body=request()
-    body['messages'] += [{'role':'tool','content':'result'}]*structural.MAX_MESSAGES
+    body['messages'] += [{'role':'tool','content':'result'}]*matching.MAX_MESSAGES
     with pytest.raises(PairRejected,match='history_alignment_limit'):
         prepare(body,body,'answer')
