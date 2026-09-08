@@ -33,6 +33,14 @@ by default.
 
 ### Learning and optional override
 
+Experimental signature retrieval is opt-in with `signature_matching=True`.
+Install `cached-response[signatures]` and run `python -m nltk.downloader words`
+first. It hashes the fully masked input and a second version preserving
+NLTK-recognized English words, retrieves scoped candidates, then ranks their
+actual differences before the existing reuse checks. Signatures never approve
+a hit. Persistent request/hit/miss counts are available through
+`cache_signatures(path="cache.db")` or `cached-response --path cache.db --signatures`.
+
 When identifier sets or tool-result text differ, a verifier can approve a specific
 input pair without learning a broader rule. List structure, instructions, provider
 state, and output-reference checks still apply. Pair approvals are checked again

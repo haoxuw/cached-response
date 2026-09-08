@@ -58,9 +58,7 @@ def prepare(
     # cannot repair it or supply a mapping. Check the complete envelope too.
     output = dumps(response)
     for key, value in previous_bindings.items():
-        if key not in mapping and re.search(
-            r"(?<!\w)" + re.escape(str(value)) + r"(?!\w)", output
-        ):
+        if key not in mapping and str(value) in output:
             raise PairRejected("unmapped_output_reference")
     reverse = {new: old for old, new in mapping.items()}
 
@@ -81,9 +79,9 @@ def prepare(
     def check(left, right, path=()):
         if type(left) is not type(right):
             raise PairRejected("pair_type_changed", path)
-        if left == right:
+        if not isinstance(left, (dict, list)) and left == right:
             return
-        if any(
+        if left != right and any(
             part in state_keys | PROTECTED
             for part in path
             if isinstance(part, str)

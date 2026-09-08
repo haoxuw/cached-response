@@ -368,3 +368,42 @@ run or whose hidden inputs change without a version change.
 It can also wrap a read-only MCP call if the wrapper returns JSON-compatible data.
 Raw SDK result objects pass through uncached. Cache only when an earlier result
 is acceptable; tool calls that change state must still execute.
+
+
+## Experimental signature retrieval
+
+Enable `signature_matching=True` after installing `cached-response[signatures]`
+and downloading `words` with `python -m nltk.downloader words`. This is opt-in;
+ordinary imports and lookups neither import NLTK nor download data. Missing NLTK
+or corpus data raises a configuration error when enabled. Install the same corpus
+on all workers; its digest versions the lexical signatures.
+
+Both signatures use the entire canonical JSON input, preserving string whitespace
+and punctuation. The masked signature replaces every alphanumeric character with
+`*`, then hashes the resulting string with SHA-256. The lexical signature retains
+alphabetic tokens found in NLTK's English word list and masks other letters and
+numbers. It preserves case. Neither signature establishes semantic equivalence;
+identifiers, unknown terminology, numbers, and non-English words can be meaningful.
+
+Testing/risky lookups retrieve up to eight entries per signature plus eight recent
+entries, deduplicate them, and rank lexical matches, masked matches, then recent
+fallbacks. Within each group, a structured distance estimate ranks actual normalized
+input differences; text comparisons sample at most 8,192 characters per changed
+leaf. All authorization checks still inspect full inputs. The verifier budget stays
+at one call per lookup. Conservative mode can collect counters but retains its
+existing reuse checks; disabled mode bypasses all of this.
+
+Candidates stay scoped by function, namespace, mode, rules, HTTP identity, model
+settings, tools and message roles. Existing cache files upgrade automatically, but
+signature indexes only cover entries written after enabling the feature. Candidate
+frequency and distance never approve reuse, and this feature learns no new ID formats.
+
+`cache_signatures(path="cache.db", limit=20)` and
+`cached-response --path cache.db --signatures` show persistent counters ordered by
+request frequency. Each scoped signature records requests, hits, misses, first seen,
+and last seen. Every request increments both kinds, so do not sum counts across
+signature kinds. Miss counts describe cache decisions, including upstream failures.
+Updates are atomic and survive process restarts; logging and in-memory diagnostic
+settings do not control them. Counters contain hashes and numbers, with no input
+excerpts. They accumulate until the cache database is removed. Existing response
+payloads in that database still retain original inputs and outputs.

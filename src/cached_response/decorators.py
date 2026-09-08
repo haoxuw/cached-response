@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
-from . import adapters, learning
+from . import adapters, learning, signatures
 from .config import refresh_probability, settings
 from .diagnostics import (
     MissDiagnostic,
@@ -139,11 +139,13 @@ class Ticket:
         config,
         learning_scope=None,
         diagnostic_scope=None,
+        signature_info=None,
     ):
         self.store, self.key, self.owner = store, key, owner
         self.body, self.normalized, self.config = body, normalized, config
         self.learning_scope = learning_scope
         self.diagnostic_scope = diagnostic_scope
+        self.signature_info = signature_info
 
     def release(self):
         try:
@@ -166,6 +168,8 @@ class Ticket:
                 self.store.put(self.key, self.owner, payload)
                 if self.learning_scope:
                     self.store.index(self.learning_scope, self.key)
+                if self.signature_info:
+                    self.store.index_signatures(*self.signature_info, self.key)
                 if (
                     self.diagnostic_scope
                     and self.diagnostic_scope != self.learning_scope
@@ -184,6 +188,24 @@ def prepare(body, scope, config, llm, verifier=None):
     diagnostic = (
         MissDiagnostic(body, config) if llm and config.diagnostics else None
     )
+    store = None
+    signature_info = None
+    if llm and config.signature_matching:
+        store = get_store(str(config.path))
+        signature_info = (
+            learning.scope_key(scope, body, config) or digest(scope),
+            signatures.fingerprints(body),
+        )
+
+    def record(kind, reason, config, key="", diagnostic=None):
+        if signature_info:
+            try:
+                store.count_signatures(*signature_info, kind == "hit")
+            except Exception as exc:
+                LOGGER.debug(
+                    "Signature counter failed error=%s", type(exc).__name__
+                )
+        decision(kind, reason, config, key, diagnostic)
 
     def miss(reason, key="", store=None, candidate_scope=None, normalized=None):
         details = None
@@ -194,12 +216,13 @@ def prepare(body, scope, config, llm, verifier=None):
                 )
             except Exception as exc:
                 details = {"diagnostic_error": type(exc).__name__}
-        decision("miss", reason, config, key, details)
+        record("miss", reason, config, key, details)
 
     if llm and word_count(body) < config.min_words:
         miss("short_input")
         return None, None
-    store = get_store(str(config.path))
+    if store is None:
+        store = get_store(str(config.path))
     model_settings = (
         {k: v for k, v in body.items() if k != "messages"}
         if isinstance(body, dict)
@@ -299,7 +322,7 @@ def prepare(body, scope, config, llm, verifier=None):
                             **details,
                         )
                 else:
-                    decision(
+                    record(
                         "hit",
                         "normalized" if payload["input"] != body else "exact",
                         config,
@@ -327,6 +350,9 @@ def prepare(body, scope, config, llm, verifier=None):
                         config,
                         verifier,
                         diagnostic=diagnostic,
+                        fingerprints=signature_info[1]
+                        if signature_info
+                        else None,
                     )
                     if result is not None:
                         result, reuse_reason = result
@@ -334,7 +360,7 @@ def prepare(body, scope, config, llm, verifier=None):
                         # Keep the original entry's age for learned reuse: a new
                         # input must not renew an old answer's freshness window.
                         store.release(key, owner)
-                        decision("hit", reuse_reason, config, key)
+                        record("hit", reuse_reason, config, key)
                         return None, result
                 except BaseException:
                     store.release(key, owner)
@@ -359,6 +385,7 @@ def prepare(body, scope, config, llm, verifier=None):
                 config,
                 learning_scope,
                 diagnostic_scope,
+                signature_info,
             ), None
         if time.monotonic() >= deadline:
             miss("busy", key)

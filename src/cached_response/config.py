@@ -64,6 +64,7 @@ class Config:
     wait_seconds: float = 300
     report: bool = False
     diagnostics: bool = True
+    signature_matching: bool = False
     diagnostic_text: bool = False
     near_miss_threshold: float = 0.90
     rules: tuple[Rule, ...] = ()
@@ -76,6 +77,10 @@ class Config:
     learning_recheck: float = 0
 
     def __post_init__(self):
+        if self.signature_matching and self.mode != "disabled":
+            from .signatures import vocabulary
+
+            vocabulary()
         if not 0 <= self.near_miss_threshold <= 1:
             raise ValueError("near_miss_threshold must be between 0 and 1")
         for name in (

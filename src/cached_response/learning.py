@@ -12,7 +12,7 @@ import random
 import re
 import time
 
-from . import adapters, pairwise
+from . import adapters, pairwise, signatures
 from .config import refresh_probability
 from .diagnostics import SCHEMA_KEYS, binding_summary, redact
 from .normalize import MARKER, PROTECTED, digest, dumps, normalize, rebind
@@ -503,13 +503,51 @@ def references_changed(result, differences):
     return False
 
 
-def lookup(store, scope, body, normalized, config, verifier, diagnostic=None):
+def lookup(
+    store,
+    scope,
+    body,
+    normalized,
+    config,
+    verifier,
+    diagnostic=None,
+    fingerprints=None,
+):
     """Return (response, reason) after guarded learning or concrete pair review."""
     current, current_bindings = reference_view(normalized)
     if MASK in dumps(current):
         return None
     attempted = False
-    for key, created, payload in store.candidates(scope, MAX_CANDIDATES):
+    candidates = store.candidates(scope, MAX_CANDIDATES)
+    ranked = {}
+    if fingerprints:
+        retrieved = store.signature_candidates(
+            scope, fingerprints, MAX_CANDIDATES
+        )
+        for key, created, payload, source in retrieved:
+            try:
+                previous, _ = reference_view(
+                    normalize(payload["input"], config.mode, config.rules)
+                )
+                delta = signatures.distance(previous, current)
+            except (ValueError, TypeError, KeyError):
+                delta = float("inf")
+            ranked[key] = (
+                0
+                if source.startswith("lexical:")
+                else 1
+                if source == "masked"
+                else 2,
+                delta,
+                source,
+            )
+        candidates = [
+            (key, created, payload) for key, created, payload, _ in retrieved
+        ]
+        candidates.sort(
+            key=lambda item: (*ranked[item[0]][:2], -item[1], item[0])
+        )
+    for key, created, payload in candidates:
 
         def reject(reason, **details):
             if diagnostic is not None:
@@ -517,6 +555,13 @@ def lookup(store, scope, body, normalized, config, verifier, diagnostic=None):
 
         if diagnostic is not None:
             diagnostic.observe(key, created, payload)
+            if key in ranked:
+                diagnostic.candidates[key]["retrieval"] = {
+                    "source": ranked[key][2].split(":")[0],
+                    "pair_distance": ranked[key][1]
+                    if ranked[key][1] != float("inf")
+                    else None,
+                }
         probability = refresh_probability(
             time.time() - created, config.refresh_start, config.refresh_force
         )

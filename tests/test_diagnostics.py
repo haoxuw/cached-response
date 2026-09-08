@@ -6,6 +6,15 @@ from pathlib import Path
 
 import pytest
 
+
+def test_excerpt_does_not_reveal_new_interior_edges():
+    from cached_response.diagnostics import differences
+    before = 'A' * 170 + 'LEAK' + 'X' * 26 + 'old' + 'B' * 200
+    after = 'A' * 170 + 'LEAK' + 'X' * 26 + 'new' + 'B' * 200
+    change = differences(before, after)[0][0]
+    assert change['before'] == '*' * 160
+    assert change['after'] == '*' * 160
+
 from cached_response import (
     cache_misses,
     cache_stats,

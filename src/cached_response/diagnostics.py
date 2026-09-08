@@ -34,12 +34,17 @@ _examples = deque(maxlen=20)
 _examples_lock = Lock()
 
 
-def redact(text):
+def redact(text, *, offset=0, total=None):
     """Keep four edge characters and symbols; mask interior letters/numbers.
 
     Output is capped at 160 characters while retaining the original suffix.
     Strings of eight characters or fewer have no interior to mask.
     """
+    if total is not None:
+        return "".join(
+            "*" if 4 <= offset + index < total - 4 and char.isalnum() else char
+            for index, char in enumerate(text)
+        )
     if len(text) > 160:
         text = text[:156] + text[-4:]
     return "".join(
@@ -176,8 +181,12 @@ def differences(before, after, include_text=False):
             right[start : start + 160],
         )
         change.update(
-            before=left_excerpt if include_text else redact(left_excerpt),
-            after=right_excerpt if include_text else redact(right_excerpt),
+            before=left_excerpt
+            if include_text
+            else redact(left_excerpt, offset=start, total=len(left)),
+            after=right_excerpt
+            if include_text
+            else redact(right_excerpt, offset=start, total=len(right)),
             offset=start,
             redacted=not include_text,
         )
@@ -259,6 +268,7 @@ class MissDiagnostic:
                 "reason": checks[-1]["reason"] if checks else reason,
                 "checks": checks,
                 "checks_truncated": candidate.get("checks_truncated", False),
+                **candidate.get("retrieval", {}),
             }
             try:
                 old = candidate["payload"]["input"]
@@ -290,6 +300,8 @@ class MissDiagnostic:
         result["near_miss"] = any(
             item.get("high_similarity", False) for item in result["candidates"]
         )
-        result["candidate_limit"] = MAX_CANDIDATES
+        result["candidate_limit"] = MAX_CANDIDATES * (
+            3 if self.config.signature_matching else 1
+        )
         result["near_miss_threshold"] = self.config.near_miss_threshold
         return result

@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS leases (key TEXT PRIMARY KEY, owner TEXT NOT NULL, ex
 CREATE TABLE IF NOT EXISTS rules (scope TEXT NOT NULL, rule TEXT NOT NULL, PRIMARY KEY(scope, rule));
 CREATE TABLE IF NOT EXISTS candidates (scope TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(scope, key));
 CREATE TABLE IF NOT EXISTS verified_rules (key TEXT NOT NULL, rule TEXT NOT NULL, PRIMARY KEY(key, rule));
+CREATE TABLE IF NOT EXISTS signature_counts (scope TEXT NOT NULL, kind TEXT NOT NULL, signature TEXT NOT NULL, requests INTEGER NOT NULL, hits INTEGER NOT NULL, misses INTEGER NOT NULL, first_seen REAL NOT NULL, last_seen REAL NOT NULL, PRIMARY KEY(scope, kind, signature));
+CREATE TABLE IF NOT EXISTS signature_entries (scope TEXT NOT NULL, kind TEXT NOT NULL, signature TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(scope, kind, key));
+CREATE INDEX IF NOT EXISTS signature_lookup ON signature_entries(scope, kind, signature);
 """
 _stores_lock = threading.Lock()
 
@@ -142,6 +145,58 @@ class Store:
                 "SELECT rule FROM verified_rules WHERE key=?", (key,)
             ).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def count_signatures(self, scope, signatures, hit):
+        now = time.time()
+        with self.connect() as db:
+            db.executemany(
+                "INSERT INTO signature_counts VALUES (?, ?, ?, 1, ?, ?, ?, ?) "
+                "ON CONFLICT(scope, kind, signature) DO UPDATE SET "
+                "requests=requests+1, hits=hits+excluded.hits, "
+                "misses=misses+excluded.misses, last_seen=excluded.last_seen",
+                [
+                    (scope, kind, value, int(hit), int(not hit), now, now)
+                    for kind, value in signatures.items()
+                ],
+            )
+
+    def index_signatures(self, scope, signatures, key):
+        with self.connect() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO signature_entries VALUES (?, ?, ?, ?)",
+                [
+                    (scope, kind, value, key)
+                    for kind, value in signatures.items()
+                ],
+            )
+
+    def signature_candidates(self, scope, signatures, limit):
+        found = {}
+        # The lexical bucket preserves known words and gets first priority.
+        for kind, value in reversed(list(signatures.items())):
+            with self.connect() as db:
+                rows = db.execute(
+                    "SELECT e.key, e.created, e.payload FROM signature_entries s "
+                    "JOIN entries e ON e.key=s.key "
+                    "WHERE s.scope=? AND s.kind=? AND s.signature=? "
+                    "ORDER BY e.created DESC, e.key LIMIT ?",
+                    (scope, kind, value, limit),
+                ).fetchall()
+            for key, created, payload in rows:
+                found.setdefault(key, (key, created, json.loads(payload), kind))
+        for key, created, payload in self.candidates(scope, limit):
+            found.setdefault(key, (key, created, payload, "recent"))
+        return list(found.values())
+
+    def signature_stats(self, limit=20):
+        with self.connect() as db:
+            cursor = db.execute(
+                "SELECT * FROM signature_counts ORDER BY requests DESC, "
+                "scope, kind, signature LIMIT ?",
+                (limit,),
+            )
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     def approve(self, key, rule):
         with self.connect() as db:

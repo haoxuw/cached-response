@@ -136,6 +136,20 @@ def test_ambiguous_or_removed_output_reference_is_rejected():
         prepared(before, after, {'target': 'trace_0123abcd'})
 
 
+def test_removed_reference_embedded_in_output_is_rejected():
+    with pytest.raises(PairRejected, match='unmapped_output_reference'):
+        prepared(request(note='trace_0123abcd'), request(note='No trace.'),
+                 {'target': 'prefix_trace_0123abcd_suffix'})
+
+
+def test_nested_equal_but_different_types_are_rejected():
+    before, after = request(), request()
+    before['messages'][0]['control'] = {'limit': 1}
+    after['messages'][0]['control'] = {'limit': True}
+    with pytest.raises(PairRejected, match='pair_type_changed'):
+        prepared(before, after, {'action': 'inspect'})
+
+
 def test_relationship_splits_cannot_rebind_output():
     before = request(note='Related job_ab12cd34')
     after = request('job_ef56ab78', 'Related job_0123abcd')
