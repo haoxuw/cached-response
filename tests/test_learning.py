@@ -77,6 +77,28 @@ def test_integer_rule_keeps_other_facts_and_types_exact():
         masked({"task": {"pid": "789", "status": "running"}}, rules)
 
 
+@pytest.mark.parametrize("mode", ["testing", "risky"])
+@pytest.mark.parametrize("changed", [True, 1.0])
+def test_nested_type_changes_cannot_hide_beside_a_learnable_date(tmp_path, mode, changed):
+    calls, judges = [], []
+
+    @cached_llm_response(mode=mode, path=tmp_path / "types.db", report=False,
+                         verifier_overrider=lambda e: judges.append(e) or {
+                             "safe_to_reuse": True, "reason": "Date change is irrelevant"})
+    def complete(body):
+        calls.append(body)
+        return {"call": len(calls)}
+
+    before, after = request("07"), request("08")
+    before["messages"][0]["control"] = {"limit": [1]}
+    after["messages"][0]["control"] = {"limit": [changed]}
+    with pytest.raises(ValueError, match="Type changed"):
+        propose(before, after)
+    assert complete(before) == {"call": 1}
+    assert complete(after) == {"call": 2}
+    assert not judges
+
+
 def test_multiline_rules_preserve_line_positions():
     left = {"value": "Run 12\nTime 34\nunchanged\n"}
     right = {"value": "Run 56\nTime 78\nunchanged\n"}

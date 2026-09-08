@@ -199,7 +199,8 @@ def pattern(before, after):
 
 
 def propose(before, after, path=()):
-    if before == after:
+    # Python equates nested 1/True/1.0; JSON types remain part of the guard.
+    if before == after and dumps(before) == dumps(after):
         return []
     if any(part in STATE_KEYS for part in path if isinstance(part, str)):
         raise ValueError("Provider state changed")
@@ -706,10 +707,11 @@ def lookup(
                 masked(old, changes),
                 masked(current, changes),
             )
-            if before_masked != after_masked:
+            guard = digest(before_masked)
+            if guard != digest(after_masked):
                 reject("unmasked_content_changed")
                 continue
-            rule = {"changes": changes, "guard": digest(before_masked)}
+            rule = {"changes": changes, "guard": guard}
             differences = changed_values(old, current, changes)
             if distinct_changes(differences) > MAX_CHANGES:
                 reject(
