@@ -407,3 +407,49 @@ Updates are atomic and survive process restarts; logging and in-memory diagnosti
 settings do not control them. Counters contain hashes and numbers, with no input
 excerpts. They accumulate until the cache database is removed. Existing response
 payloads in that database still retain original inputs and outputs.
+
+## Experimental structural matching
+
+`structural_matching=True` adds a bounded retrieval and pair-preparation path in
+testing/risky modes when learning is enabled. It is disabled by default and does
+not require NLTK. Existing exact, normalized, rule, and strict pair checks remain.
+Additional candidates share the caller, namespace, HTTP identity, mode, rules,
+model settings and tool schemas, but may have different message-role sequences.
+Only entries saved with this option have the additional index. Retrieval combines
+existing candidates with up to 24 recent entries in that broader scope, ranks
+structured differences, and examines at most 24 candidates. It is a bounded recent
+index, not a complete nearest-neighbor search over the whole database.
+
+Alignment uses message roles and tool function names, including the function
+producing each tool result. All system/developer/user messages must align and
+remain exact after a proposed ID mapping. Reference mappings come from matching
+structured locations and string contexts. They must be one-to-one; extra
+occurrences can remain visible for review. Missing output references, ambiguous
+mappings affecting instructions/output, changed opaque provider state, and changes
+to types at aligned locations still reject the pair. Alignment stops above 256
+messages. Unknown roles and a changed terminal role also reject it.
+
+Added/removed data messages and changed historical tool arguments or result
+structures may reach the verifier. They are never silently removed. The callback
+receives full `old_input`, `new_input`, original/rebound responses, and
+`reference_alignment`, which includes aligned message indices and added/removed
+indices for broader pairs. These are navigation aids, not proof of equivalence.
+The verifier must decide whether the earlier response remains valid under the
+entire new history. Approvals apply to that concrete pair only and are checked
+again on the next lookup. There is at most one verifier call per lookup.
+
+The built-in verifier serializes large evidence using a lossless `shared-json-v1`
+envelope when it saves space: `document` contains null placeholders, `shared`
+contains full values, and `references` identifies the exact paths to restore.
+Literal input keys or nulls cannot act as references. The 300,000-character budget
+applies to the transported evidence and verifier instruction; oversized evidence
+still falls back upstream. Custom verifier callbacks continue receiving the full,
+ordinary evidence dictionary. No encoding or logging changes affect the original
+upstream request.
+
+Use `python examples/minimal/structural_pairs.py` to compare the option off/on.
+Its explicit fixture verifier demonstrates rebinding and review; it does not
+establish semantic safety or predict live hit rates. Broader matching should be
+evaluated using task outcomes, false reuse, verifier cost and latency as well as
+hits. Defaults for logging, diagnostic redaction and conservative/disabled modes
+are unchanged.

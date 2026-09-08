@@ -12,7 +12,7 @@ import random
 import re
 import time
 
-from . import adapters, pairwise, signatures
+from . import adapters, evidence, pairwise, signatures, structural
 from .config import refresh_probability
 from .diagnostics import SCHEMA_KEYS, binding_summary, redact
 from .normalize import MARKER, PROTECTED, digest, dumps, normalize, rebind
@@ -428,12 +428,14 @@ def approve(
         request.update(pair)
         request["instruction"] = PAIR_INSTRUCTION
         request["verification_kind"] = "input_pair"
-    if len(dumps(request)) > MAX_JUDGE_CHARS:
+    instruction, text = evidence.transport(request)
+    wire_chars = len(instruction) + len(text)
+    if wire_chars > MAX_JUDGE_CHARS:
         if diagnostic is not None:
             diagnostic.reject(
                 key,
                 "verifier_input_too_large",
-                chars=len(dumps(request)),
+                chars=wire_chars,
                 limit=MAX_JUDGE_CHARS,
             )
         return False
@@ -513,6 +515,7 @@ def lookup(
     verifier,
     diagnostic=None,
     fingerprints=None,
+    structural_scope=None,
 ):
     """Return (response, reason) after guarded learning or concrete pair review."""
     current, current_bindings = reference_view(normalized)
@@ -548,6 +551,26 @@ def lookup(
         candidates.sort(
             key=lambda item: (*ranked[item[0]][:2], -item[1], item[0])
         )
+    if structural_scope:
+        combined = {item[0]: item for item in candidates}
+        for item in store.candidates(
+            structural_scope, structural.MAX_CANDIDATES
+        ):
+            combined.setdefault(item[0], item)
+        candidates = list(combined.values())
+        for key, _, payload in candidates:
+            try:
+                previous, _ = reference_view(
+                    normalize(payload["input"], config.mode, config.rules)
+                )
+                delta = signatures.distance(previous, current)
+            except (ValueError, TypeError, KeyError):
+                delta = float("inf")
+            ranked[key] = (0, delta, "structural")
+        candidates.sort(
+            key=lambda item: (ranked[item[0]][1], -item[1], item[0])
+        )
+        candidates = candidates[: structural.MAX_CANDIDATES]
     for key, created, payload in candidates:
 
         def reject(reason, **details):
@@ -589,7 +612,7 @@ def lookup(
             def review_pair():
                 nonlocal attempted, stage
                 try:
-                    pair_result, details = pairwise.prepare(
+                    arguments = (
                         old,
                         current,
                         old_bindings,
@@ -597,6 +620,12 @@ def lookup(
                         payload["result"],
                         STATE_KEYS,
                     )
+                    try:
+                        pair_result, details = pairwise.prepare(*arguments)
+                    except pairwise.PairRejected:
+                        if not structural_scope:
+                            raise
+                        pair_result, details = structural.prepare(*arguments)
                 except pairwise.PairRejected as exc:
                     reject(
                         exc.reason,

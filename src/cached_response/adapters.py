@@ -8,6 +8,7 @@ import logging
 import time
 
 from .diagnostics import prompt_stats
+from .evidence import transport
 from .normalize import digest
 
 DROP_HEADERS = {"content-length", "transfer-encoding", "connection"}
@@ -80,6 +81,7 @@ def request_scope(request, arguments):
 
 def verification_body(body, evidence):
     """Build the judge request using the package's default instructions."""
+    instruction, text = transport(evidence)
     controls = {
         "messages",
         "tools",
@@ -101,12 +103,13 @@ def verification_body(body, evidence):
         "temperature": 0,
         token_limit: VERIFIER_MAX_TOKENS,
         "messages": [
-            {"role": "system", "content": evidence["instruction"]},
+            {
+                "role": "system",
+                "content": instruction,
+            },
             {
                 "role": "user",
-                "content": json.dumps(
-                    {k: v for k, v in evidence.items() if k != "instruction"}
-                ),
+                "content": text,
             },
         ],
         "response_format": {"type": "json_object"},

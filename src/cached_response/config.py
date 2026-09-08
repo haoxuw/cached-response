@@ -65,6 +65,7 @@ class Config:
     report: bool = False
     diagnostics: bool = True
     signature_matching: bool = False
+    structural_matching: bool = False
     diagnostic_text: bool = False
     near_miss_threshold: float = 0.90
     rules: tuple[Rule, ...] = ()

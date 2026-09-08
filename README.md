@@ -47,6 +47,13 @@ state, and output-reference checks still apply. Pair approvals are checked again
 on every lookup; `learning=False` disables verification. See the
 [matching reference](docs/reference.md) for the boundaries and cost.
 
+For histories with added tool results or repeated ID occurrences, testing/risky
+mode can opt into `structural_matching=True`. It aligns conversation steps and
+requires verification of the complete pair; it never discards added history.
+This option needs no NLTK dependency. Large built-in verifier requests share
+identical JSON sections once, without truncating input. Run
+`python examples/minimal/structural_pairs.py` for a synthetic demonstration.
+
 Testing and risky modes include verification prompts. For a function taking one chat-request
 dictionary with `messages`, the package uses your existing model function to
 check whether a proposed matching rule is safe. Supported HTTP handlers work too.

@@ -301,7 +301,9 @@ class MissDiagnostic:
             item.get("high_similarity", False) for item in result["candidates"]
         )
         result["candidate_limit"] = MAX_CANDIDATES * (
-            3 if self.config.signature_matching else 1
+            3
+            if self.config.signature_matching or self.config.structural_matching
+            else 1
         )
         result["near_miss_threshold"] = self.config.near_miss_threshold
         return result
