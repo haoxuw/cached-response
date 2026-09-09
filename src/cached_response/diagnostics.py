@@ -67,7 +67,9 @@ def cache_misses(limit=5):
     """Return recent process-local miss examples, newest first (at most 20).
 
     Examples contain masked text unless diagnostic_text=True was explicitly set.
-    No cache payloads are retained here. Returned values are independent copies.
+    Complete inputs are retained only with diagnostic_raw_inputs=True.
+    Returned values are independent copies. Disabling raw collection does not
+    erase earlier examples or files.
     """
     if not isinstance(limit, int) or limit < 0:
         raise ValueError("limit must be a nonnegative integer")
@@ -187,7 +189,9 @@ def capture_misses(
                         }
                     )
                 if include_text:
-                    event["input"] = diagnostic.body
+                    event["input"] = diagnostic.original_input
+                    if diagnostic.original_input != diagnostic.body:
+                        event["lookup_input"] = diagnostic.body
                 line = dumps(event) + "\n"
                 size = len(line.encode())
                 if status["bytes"] + size > max_bytes:
@@ -295,8 +299,9 @@ def differences(before, after, include_text=False):
 
 
 class MissDiagnostic:
-    def __init__(self, body, config):
+    def __init__(self, body, config, original_input=None):
         self.body = body
+        self.original_input = body if original_input is None else original_input
         self.config = config
         self.candidates = {}
 
@@ -353,7 +358,7 @@ class MissDiagnostic:
                     else "verification_unavailable",
                 )
         if normalized is None:
-            return result
+            return self.with_raw_inputs(result)
         current_signature = signature(normalized.body)
         for key, candidate in self.candidates.items():
             checks = candidate["checks"]
@@ -415,4 +420,28 @@ class MissDiagnostic:
                 "capture": "capture_misses(path, include_text=True, limit=10)",
                 "requires": "authorized test traffic in the serving process",
             }
+        return self.with_raw_inputs(result)
+
+    def with_raw_inputs(self, result):
+        """Attach complete inputs only on explicit opt-in, within one size budget."""
+        if not self.config.diagnostic_raw_inputs:
+            return result
+        raw = {"caller_input": self.original_input}
+        if self.original_input != self.body:
+            raw["lookup_input"] = self.body
+        if result["candidates"]:
+            closest = result["candidates"][0]
+            raw["candidate_key"] = closest["key"]
+            raw["candidate_input"] = self.candidates[closest["key"]]["payload"][
+                "input"
+            ]
+        size = len(dumps(raw).encode())
+        if size > self.config.max_entry_bytes:
+            result["raw_inputs_omitted"] = {
+                "reason": "max_entry_bytes",
+                "bytes": size,
+                "limit": self.config.max_entry_bytes,
+            }
+        else:
+            result["raw_inputs"] = raw
         return result

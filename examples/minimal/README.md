@@ -53,3 +53,6 @@ verifier. It adds a history message and changes a repeated resource ID. The
 two cases both make two upstream calls and skip verification: changed targets
 and histories cannot be declared irrelevant. Run `python examples/minimal/structural_pairs.py`; no credentials
 or NLTK data are needed.
+
+Run `python examples/minimal/raw_miss_inputs.py` to opt into complete dummy miss
+inputs. Raw collection starts disabled; enabling it reveals the second fixture.

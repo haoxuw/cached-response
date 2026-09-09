@@ -151,6 +151,7 @@ Set options directly on either decorator:
 | `refresh_force="7d"` | Always run it again once the saved result is seven days old. |
 | `report=True` | Opt in to cache count summaries on stderr (default: off). |
 | `diagnostics=True` | Keep miss statistics and up to 20 recent redacted examples in memory. |
+| `diagnostic_raw_inputs=False` | Opt in to complete miss inputs; silent unless logging is enabled. |
 | `diagnostic_text=False` | Mask diagnostic text by default; `True` explicitly enables raw excerpts. |
 | `near_miss_threshold=0.90` | Similarity threshold for flagging a miss for investigation; never permits reuse. |
 | `namespace="my-app"` | Keep separate applications or users' caches apart. |
@@ -200,6 +201,30 @@ configure_logging(path="cache_diagnostics.log")  # File only; no console output
 # configure_logging(console=True)               # Explicit console opt-in
 # configure_logging(enabled=False)              # Remove this helper's handlers
 ```
+
+To inspect complete, unredacted miss inputs in this process:
+
+```python
+from cached_response import configure, configure_logging, cache_misses
+
+configure(diagnostic_raw_inputs=True, diagnostic_text=True)
+configure_logging(console=True)
+# Run your requests, then inspect the latest miss:
+# print(cache_misses(1))
+
+# Turn raw collection and console output back off:
+configure(diagnostic_raw_inputs=False, diagnostic_text=False)
+configure_logging(enabled=False)
+```
+
+`configure()` changes global package settings, including existing decorators;
+decorator options take priority. `diagnostic_raw_inputs` includes the actual
+caller input and closest stored candidate. It also shows the lookup input when
+test aliases changed it. `diagnostic_text` alone only unmasks short excerpts.
+Raw inputs can contain private data; enabling this also keeps them in recent
+miss examples and any enabled log file. Turning it off does not erase old logs.
+Inputs exceeding `max_entry_bytes` are explicitly omitted. Caching must be enabled
+for miss diagnostics; these switches do not enable it.
 
 This configures only `cached_response` loggers. It never changes root handlers,
 root levels, or third-party loggers, and package records do not propagate to root.
