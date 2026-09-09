@@ -54,6 +54,7 @@ class Rule:
             "iso_time": ISO_TIME,
             "hex_id": r"[A-Fa-f0-9]{8,128}",
             "digits": r"[0-9]{1,32}",
+            "task_id": r"t_[A-Za-z0-9_-]{6,126}",
         }
         return cls(name, patterns[name], tuple(paths))
 

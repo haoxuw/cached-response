@@ -234,7 +234,7 @@ in unchanged context reject reuse. Bytes/tuple response envelopes are not eligib
 for broader reuse. No identifier rebinding takes place.
 
 `metadata_rules=(Rule.preset("uuid", paths=("metadata.trace",)),)` adds a
-caller-reviewed rule. Presets also include `iso_time`, `hex_id` and `digits`.
+caller-reviewed rule. Presets also include `iso_time`, `hex_id`, `digits` and `task_id` (bounded `t_` labels).
 Custom `Rule(name, pattern, paths)` expressions must match both complete string
 values. Rules skip model review only when they cover every changed segment after
 the guards and validator pass. They work with `learning=False`, only in testing
