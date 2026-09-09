@@ -5,15 +5,171 @@ import enum
 import inspect
 import json
 import logging
+import re
 import time
 
 from .diagnostics import prompt_stats
-from .normalize import digest, dumps
+from .normalize import PROTECTED, THOUGHT_SEPARATOR, digest, dumps, translate
 
 DROP_HEADERS = {"content-length", "transfer-encoding", "connection"}
 IDENTITY_HEADERS = ("authorization", "x-api-key", "api-key")
 VERIFIER_MAX_TOKENS = 2048
 LOGGER = logging.getLogger("cached_response.verifier")
+
+
+class TestAliases:
+    """An explicit test contract, applied before lookup AND provider inference."""
+
+    def __init__(self, body, scope, config):
+        from .storage import get_store
+
+        specification = config.test_aliases(json.loads(dumps(body)))
+        self.mapping = {}
+        self.body = body
+        if specification is None:
+            return
+        conversation, mapping = specification
+        if (
+            not isinstance(conversation, str)
+            or not conversation
+            or not isinstance(mapping, dict)
+        ):
+            raise ValueError(
+                "Test aliases require a conversation key and ID mapping"
+            )
+        if not mapping or any(
+            not isinstance(v, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", v)
+            for pair in mapping.items()
+            for v in pair
+        ):
+            raise ValueError("Test aliases require explicit bounded opaque IDs")
+        if any(v in mapping and mapping[v] != v for v in mapping.values()):
+            raise ValueError("Test alias overlaps an application ID")
+        self.store = get_store(str(config.path))
+        self.scope = digest(
+            {"alias": 1, "caller": scope, "version": config.alias_version}
+        )
+        self.expires = time.time() + config.refresh_force
+        self.mapping = self.store.bind_aliases(
+            digest({"scope": self.scope, "conversation": conversation}),
+            mapping,
+            self.expires,
+        )
+        # Canonical handles cannot already name unrelated data in this request.
+        for target in set(self.mapping.values()) - set(self.mapping):
+            if re.search(
+                r"(?<!\w)" + re.escape(target) + r"(?!\w)", dumps(body)
+            ):
+                raise ValueError("Canonical test ID already occurs in input")
+        self.body = {
+            **body,
+            "messages": translate(
+                json.loads(dumps(body["messages"])), self.mapping
+            ),
+        }
+        for before, after in zip(body["messages"], self.body["messages"]):
+            for old_call, call in zip(
+                before.get("tool_calls") or [], after.get("tool_calls") or []
+            ):
+                original = self.store.review(self.part_key(call))
+                if original:
+                    if self.function_value(
+                        call["function"]
+                    ) != self.function_value(original):
+                        raise ValueError(
+                            "Signed tool arguments differ from original response"
+                        )
+                    call["function"] = original
+                elif call != old_call and (
+                    THOUGHT_SEPARATOR in call.get("id", "")
+                    or any(k in PROTECTED for k in (*before, *call))
+                ):
+                    raise ValueError(
+                        "Original signed tool arguments are unavailable"
+                    )
+
+    def part_key(self, call):
+        return digest({"alias_part": self.scope, "id": call.get("id")})
+
+    @staticmethod
+    def function_value(function):
+        result = dict(function)
+        try:
+            result["arguments"] = json.loads(result["arguments"])
+        except (KeyError, ValueError, TypeError):
+            pass
+        return dumps(result)
+
+    def output(self, payload):
+        if not self.mapping:
+            return payload
+        if payload["kind"] not in {"json", "http", "sse"}:
+            raise ValueError(
+                "Test aliases require text or JSON model responses"
+            )
+        rendered = translate(payload, {v: k for k, v in self.mapping.items()})
+        if translate(rendered, self.mapping) != payload:
+            raise ValueError(
+                "Test aliases do not round-trip the provider response"
+            )
+        values = (
+            payload["value"] if payload["kind"] == "sse" else [payload["value"]]
+        )
+        for value in values:
+            for choice in (
+                value.get("choices", []) if isinstance(value, dict) else []
+            ):
+                message = choice.get("message", choice.get("delta", {}))
+                for call in message.get("tool_calls") or []:
+                    # Preserve raw argument text, including whitespace, for the
+                    # exact signed part returned by the provider on later turns.
+                    if THOUGHT_SEPARATOR in call.get("id", "") or any(
+                        k in PROTECTED for k in (*message, *call)
+                    ):
+                        key = self.part_key(call)
+                        old = self.store.review(key)
+                        if old is not None and old != call["function"]:
+                            raise ValueError("Provider reused a signed call ID")
+                        self.store.review(key, call["function"], self.expires)
+        return rendered
+
+
+def replace_input(function, args, kwargs, body):
+    """Replace the one request body, retaining FastAPI connection metadata."""
+    request = http_request(args, kwargs)
+    if request is not None:
+        from starlette.requests import Request
+
+        raw = json.dumps(body).encode()
+        scope = dict(request.scope)
+        scope["headers"] = [
+            (k, v)
+            for k, v in scope["headers"]
+            if k.lower() != b"content-length"
+        ]
+        scope["headers"].append((b"content-length", str(len(raw)).encode()))
+
+        async def receive():
+            return {"type": "http.request", "body": raw, "more_body": False}
+
+        replacement = Request(scope, receive)
+        return (
+            tuple(replacement if v is request else v for v in args),
+            {k: replacement if v is request else v for k, v in kwargs.items()},
+        )
+    bound = inspect.signature(function).bind(*args, **kwargs)
+    bound.apply_defaults()
+    names = [k for k in bound.arguments if k != "use_cache"]
+    if len(names) != 1:
+        raise ValueError("Test aliases need one chat-request dictionary")
+    value = bound.arguments[names[0]]
+    if not isinstance(value, dict) or not isinstance(
+        value.get("messages"), list
+    ):
+        raise ValueError("Expected one chat-request dictionary with messages")
+    bound.arguments[names[0]] = body
+    return bound.args, bound.kwargs
 
 
 def json_value(value):
@@ -177,24 +333,9 @@ def verification_body(body, evidence):
 
 def verification_arguments(function, args, kwargs, body, evidence):
     """Replace a single chat-request dictionary without calling the decorator."""
-    bound = inspect.signature(function).bind(*args, **kwargs)
-    bound.apply_defaults()
-    values = {
-        key: value
-        for key, value in bound.arguments.items()
-        if key != "use_cache"
-    }
-    if len(values) != 1:
-        raise ValueError(
-            "Default verification needs one chat-request dictionary"
-        )
-    name, value = next(iter(values.items()))
-    if not isinstance(value, dict) or not isinstance(
-        value.get("messages"), list
-    ):
-        raise ValueError("Default verification needs a messages list")
-    bound.arguments[name] = verification_body(body, evidence)
-    return bound.args, bound.kwargs
+    return replace_input(
+        function, args, kwargs, verification_body(body, evidence)
+    )
 
 
 def verification_result(result):
@@ -220,31 +361,11 @@ async def verify_async_function(function, args, kwargs, body, evidence):
 
 async def verify_http(function, args, kwargs, request, body, evidence):
     """Use the application's existing provider connection without recursion."""
-    from starlette.requests import Request
-
     judge_body = verification_body(body, evidence)
-    raw = json.dumps(judge_body).encode()
-    scope = dict(request.scope)
-    scope["headers"] = [
-        (k, v)
-        for k, v in scope.get("headers", [])
-        if k.lower() != b"content-length"
-    ]
-    scope["headers"].append((b"content-length", str(len(raw)).encode()))
-
-    async def receive():
-        return {"type": "http.request", "body": raw, "more_body": False}
-
-    replacement = Request(scope, receive)
+    args, kwargs = replace_input(function, args, kwargs, judge_body)
     started, result, error = time.monotonic(), None, None
     try:
-        result = await function(
-            *(replacement if value is request else value for value in args),
-            **{
-                key: replacement if value is request else value
-                for key, value in kwargs.items()
-            },
-        )
+        result = await function(*args, **kwargs)
         if hasattr(result, "status_code"):
             if result.status_code != 200:
                 raise ValueError("Verifier HTTP failure")

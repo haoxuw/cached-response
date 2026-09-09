@@ -90,7 +90,13 @@ reuse or reject the same candidate under unchanged context; an uncovered pattern
 or conflicting decisions fall through to the judge. Uncertain verdicts save no
 rule. Inspect `learned_unsafe`, `rejected_pair` and `verifier_uncertain` miss reasons.
 Do not turn a model's suggested swap into a system-text or thought-signature rule:
-automatic learning only supports declared metadata.
+automatic learning only supports declared metadata. For fresh isolated test
+handles, an explicit `test_aliases` callback maps application IDs to stable
+schema-compatible IDs before inference; it returns a conversation key and a
+one-to-one mapping. The adapter renders current IDs and restores recorded signed
+arguments. It never substitutes signature bytes. Keep the contract stable across
+turns, reset test state between repetitions, and include stream buffering time.
+See the [test-ID guide](https://github.com/haoxuw/cached-response/blob/main/docs/test-id-aliases.md).
 
 ## Prove the improvement
 

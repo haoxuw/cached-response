@@ -51,6 +51,11 @@ def policy(config):
         "verifier_model": config.verifier_model,
         "verifier_options": config.verifier_options,
         "verifier_version": config.verifier_version,
+        **(
+            {"test_aliases": True, "alias_version": config.alias_version}
+            if config.test_aliases
+            else {}
+        ),
     }
 
 
