@@ -2,7 +2,7 @@
 
 import logging as _logging
 
-from .config import Config, Rule, configure
+from .config import Config, Rule, TestMetadata, configure
 from .decorators import cache_stats, cached_llm_response, cached_staticmethod
 from .diagnostics import cache_misses, capture_misses
 from .log_config import configure_logging
@@ -29,6 +29,7 @@ _logger.propagate = False
 __all__ = [
     "Config",
     "Rule",
+    "TestMetadata",
     "configure",
     "cache_stats",
     "cache_misses",

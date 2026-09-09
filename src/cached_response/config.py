@@ -59,6 +59,36 @@ class Rule:
 
 
 @dataclass(frozen=True)
+class TestMetadata:
+    """Replace declared irrelevant numeric tool-result fields with typed zero.
+
+    Paths are tuples relative to the tool result; '*' selects a list element.
+    This changes the test input sent to the model, not just the cache key.
+    """
+
+    tool: str
+    paths: tuple[tuple[str, ...], ...]
+    value_type: str = "int"
+
+    def __post_init__(self):
+        if not isinstance(self.tool, str) or not self.tool:
+            raise ValueError("TestMetadata requires an exact tool name")
+        if self.value_type not in ("int", "float"):
+            raise ValueError("TestMetadata value_type must be int or float")
+        if (
+            not isinstance(self.paths, tuple)
+            or not self.paths
+            or any(
+                not isinstance(path, tuple)
+                or not path
+                or any(not isinstance(p, str) or not p for p in path)
+                for path in self.paths
+            )
+        ):
+            raise ValueError("TestMetadata requires nonempty tuple paths")
+
+
+@dataclass(frozen=True)
 class Config:
     """Immutable defaults accepted as decorator or configure keyword arguments.
 
@@ -101,8 +131,15 @@ class Config:
         default=None, compare=False, repr=False
     )
     alias_version: str = "1"
+    test_metadata: tuple[TestMetadata, ...] = ()
 
     def __post_init__(self):
+        if not isinstance(self.test_metadata, tuple) or any(
+            not isinstance(rule, TestMetadata) for rule in self.test_metadata
+        ):
+            raise ValueError(
+                "test_metadata must be a tuple of TestMetadata rules"
+            )
         if self.signature_matching and self.mode != "disabled":
             from .signatures import vocabulary
 
