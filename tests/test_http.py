@@ -38,23 +38,25 @@ def application(stream=False, truncated=False, status=200):
     return TestClient(app), calls
 
 
-def test_http_json_rebinding():
+def test_http_json_changed_identifier_misses():
     client, calls = application()
     assert client.post("/v1/chat/completions", json=body(UUID_A)).json()["text"] == UUID_A
     assert client.post("/v1/chat/completions", json=body(UUID_B)).json()["text"] == UUID_B
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
-def test_sse_rebinds_arguments_across_chunks():
+def test_sse_changed_identifier_misses_then_exact_hit():
     client, calls = application(stream=True)
     client.post("/v1/chat/completions", json=body(UUID_A))
+    response = client.post("/v1/chat/completions", json=body(UUID_B))
+    # Repeated identical input replays the completed, coalesced stream.
     response = client.post("/v1/chat/completions", json=body(UUID_B))
     assert response.status_code == 200
     events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data:") and "[DONE]" not in line]
     call = events[0]["choices"][0]["delta"]["tool_calls"][0]
     assert json.loads(call["function"]["arguments"])["task_id"] == UUID_B
     assert call["extra_content"]["google"]["thought_signature"] == "opaque-signature"
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_incomplete_stream_not_cached():

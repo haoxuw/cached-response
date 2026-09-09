@@ -3,12 +3,8 @@
 import fnmatch
 import hashlib
 import json
-import math
 import re
-from collections import Counter
 from dataclasses import dataclass
-
-from .config import Rule
 
 MARKER = "⟪SLC:"
 UUID = r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
@@ -17,17 +13,22 @@ ISO_TIME = (
 )
 SYMBOL_TOKEN = r"(?<![\w/+])(?=[A-Za-z0-9_+=~-]{16,}(?![\w/+]))[A-Za-z0-9_+=~-]{16,}(?![\w/+])"
 PREFIXED_HEX = re.compile(r"\b([A-Za-z][A-Za-z0-9]*[_-])([0-9a-fA-F]{8,})\b")
-MACHINE_TOKEN = re.compile(r"\b[A-Za-z0-9]+(?:[_-][A-Za-z0-9]+)*\b")
 PROTECTED = {
     "thought_signature",
     "thoughtSignature",
+    "thought_signatures",
+    "thoughtSignatures",
     "signature",
     "provider_specific_fields",
     "extra_content",
+    "encrypted_content",
+    "reasoning_content",
+    "reasoning",
+    "redacted_thinking",
+    "thinking",
+    "thinking_blocks",
 }
-MIN_MACHINE_LENGTH = 8
 MIN_SYMBOL_FRACTION = 0.30
-DISCOVERY_FRACTION = 0.05
 URL = re.compile(r"https?://[^\s\"<>]+")
 THOUGHT_SEPARATOR = "__thought__"
 SIGNED_ID = re.compile(r"\bcall_[A-Za-z0-9_-]+__thought__[A-Za-z0-9+/=_-]+")
@@ -72,32 +73,15 @@ def word_count(body):
 class Normalized:
     body: object
     bindings: dict
-    learned: list
 
 
-def normalize(body, mode, rules=(), learned=()):
+def normalize(body, mode, rules=()):
     """Normalize message values; model parameters and tool schemas stay exact."""
     if any(MARKER in text for text in strings(body)):
         raise ValueError("Input contains a reserved cache placeholder")
-    bindings, indices, discovered = {}, {}, []
+    bindings, indices = {}, {}
     common = [("UUID", re.compile(UUID)), ("TIME", re.compile(ISO_TIME))]
-    custom = [(rule, re.compile(rule.pattern)) for rule in (*rules, *learned)]
-    # Once a scope has learned rules, use them directly without recounting the
-    # vocabulary. A new function/model/schema scope starts discovery afresh.
-    corpus = (
-        Counter(
-            token
-            for text in strings(body)
-            for token in MACHINE_TOKEN.findall(text)
-        )
-        if mode == "risky" and not learned
-        else Counter()
-    )
-    rare = set(
-        sorted(corpus, key=lambda token: (corpus[token], token))[
-            : math.ceil(len(corpus) * DISCOVERY_FRACTION)
-        ]
-    )
+    custom = [(rule, re.compile(rule.pattern)) for rule in rules]
 
     def bind(kind, value):
         identity = (kind, dumps(value))
@@ -155,36 +139,6 @@ def normalize(body, mode, rules=(), learned=()):
                     for m in pattern.finditer(text)
                     if m.end() > m.start()
                 )
-        if mode == "risky":
-            for match in MACHINE_TOKEN.finditer(text):
-                token = match.group()
-                if (
-                    token in rare
-                    and len(token) >= MIN_MACHINE_LENGTH
-                    and any(c.isalpha() for c in token)
-                    and any(c.isdigit() for c in token)
-                ):
-                    # Keep literal separators and group letter/digit runs. No
-                    # ordinary alphabetic word is a discovery candidate.
-                    pattern = (
-                        "\\b"
-                        + "".join(
-                            f"[A-Za-z]{{{len(part)}}}"
-                            if part.isalpha()
-                            else f"[0-9]{{{len(part)}}}"
-                            if part.isdigit()
-                            else re.escape(part)
-                            for part in re.findall(
-                                r"[A-Za-z]+|[0-9]+|[^A-Za-z0-9]+", token
-                            )
-                        )
-                        + "\\b"
-                    )
-                    rule = Rule("DISCOVERED", pattern, (path,))
-                    discovered.append(rule)
-                    matches.append(
-                        (match.start(), match.end(), rule.name, token)
-                    )
         # Select non-overlapping spans. Longest wins when rules share a start.
         protected_spans = [
             (match.start(), match.end())
@@ -240,7 +194,7 @@ def normalize(body, mode, rules=(), learned=()):
         canonical["messages"] = walk(body["messages"], "messages")
     else:
         canonical = walk(body)
-    return Normalized(canonical, bindings, discovered)
+    return Normalized(canonical, bindings)
 
 
 def rebind(value, previous, current):

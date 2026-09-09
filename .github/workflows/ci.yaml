@@ -29,3 +29,33 @@ jobs:
       - run: ruff check src examples
       - run: ruff format --check src examples
       - run: python -m pytest -q
+
+  package:
+    name: Build and test distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - name: Test installed wheel
+        run: |
+          python -m pip install "$(find dist -name '*.whl')[test]"
+          python -c "import cached_response; print(cached_response.__file__)"
+          python -m pytest -q
+      - name: Exercise NLTK signatures with the installed wheel
+        run: |
+          python -m pip install "$(find dist -name '*.whl')[signatures]"
+          python -m nltk.downloader -q words
+          python examples/minimal/signature_counts.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-distributions
+          path: dist/
+          if-no-files-found: error

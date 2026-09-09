@@ -18,20 +18,19 @@ from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
-from . import adapters, learning
+from . import adapters, matching, signatures
 from .config import refresh_probability, settings
 from .diagnostics import (
     MissDiagnostic,
-    binding_summary,
     cache_misses,
     remember,
 )
-from .normalize import Normalized, digest, dumps, normalize, rebind, word_count
+from .normalize import Normalized, digest, dumps, normalize, word_count
 from .storage import get_store
 
 LOGGER = logging.getLogger("cached_response")
 POLL_INTERVAL = 0.05
-FORMAT_VERSION = 4
+FORMAT_VERSION = 6
 MARSHAL_VERSION = (
     2  # Avoid reference-sharing flags changing after introspection.
 )
@@ -53,6 +52,11 @@ def cache_stats() -> dict[str, Any]:
     )
     misses = result.get("miss", 0)
     result["cache_miss_percent"] = 100 * misses / requests if requests else 0.0
+    result["hit_reasons"] = {
+        key.removeprefix("hit_reason:"): result.pop(key)
+        for key in list(result)
+        if key.startswith("hit_reason:")
+    }
     result["miss_reasons"] = {
         key.removeprefix("miss_reason:"): result.pop(key)
         for key in list(result)
@@ -80,8 +84,7 @@ def decision(kind, reason, config, key="", diagnostic=None):
     with _stats_lock:
         _stats["requests"] += 1
         _stats[kind] += 1
-        if kind == "miss":
-            _stats[f"miss_reason:{reason}"] += 1
+        _stats[f"{kind}_reason:{reason}"] += 1
         if diagnostic is not None:
             _stats["diagnosed_misses"] += 1
             candidates = diagnostic.get("candidates", [])
@@ -137,13 +140,15 @@ class Ticket:
         body,
         normalized,
         config,
-        learning_scope=None,
+        matching_scope=None,
         diagnostic_scope=None,
+        signature_info=None,
     ):
         self.store, self.key, self.owner = store, key, owner
         self.body, self.normalized, self.config = body, normalized, config
-        self.learning_scope = learning_scope
+        self.matching_scope = matching_scope
         self.diagnostic_scope = diagnostic_scope
+        self.signature_info = signature_info
 
     def release(self):
         try:
@@ -164,11 +169,18 @@ class Ticket:
             )
             if len(payload.encode()) <= self.config.max_entry_bytes:
                 self.store.put(self.key, self.owner, payload)
-                if self.learning_scope:
-                    self.store.index(self.learning_scope, self.key)
+                if self.matching_scope:
+                    self.store.index(self.matching_scope, self.key)
+                    metadata_scope = matching.metadata_scope(
+                        self.matching_scope, self.body, self.config
+                    )
+                    if metadata_scope:
+                        self.store.index(metadata_scope, self.key)
+                if self.signature_info:
+                    self.store.index_signatures(*self.signature_info, self.key)
                 if (
                     self.diagnostic_scope
-                    and self.diagnostic_scope != self.learning_scope
+                    and self.diagnostic_scope != self.matching_scope
                 ):
                     self.store.index(self.diagnostic_scope, self.key)
         except Exception as exc:
@@ -182,8 +194,34 @@ class Ticket:
 def prepare(body, scope, config, llm, verifier=None):
     """Returns (ticket, cached envelope). A None ticket means bypass."""
     diagnostic = (
-        MissDiagnostic(body, config) if llm and config.diagnostics else None
+        MissDiagnostic(body, config)
+        if llm and (config.diagnostics or config.diagnostic_capture)
+        else None
     )
+    store = None
+    signature_info = None
+    if llm and config.signature_matching:
+        store = get_store(str(config.path))
+        signature_info = (
+            matching.scope_key(
+                scope,
+                body,
+                config,
+                include_roles=not config.structural_matching,
+            )
+            or digest(scope),
+            signatures.fingerprints(body),
+        )
+
+    def record(kind, reason, config, key="", diagnostic=None):
+        if signature_info:
+            try:
+                store.count_signatures(*signature_info, kind == "hit")
+            except Exception as exc:
+                LOGGER.debug(
+                    "Signature counter failed error=%s", type(exc).__name__
+                )
+        decision(kind, reason, config, key, diagnostic)
 
     def miss(reason, key="", store=None, candidate_scope=None, normalized=None):
         details = None
@@ -192,40 +230,34 @@ def prepare(body, scope, config, llm, verifier=None):
                 details = diagnostic.finish(
                     store, candidate_scope, normalized, reason
                 )
+                if config.diagnostic_capture:
+                    config.diagnostic_capture(diagnostic, details)
             except Exception as exc:
                 details = {"diagnostic_error": type(exc).__name__}
-        decision("miss", reason, config, key, details)
+        record("miss", reason, config, key, details)
 
     if llm and word_count(body) < config.min_words:
         miss("short_input")
         return None, None
-    store = get_store(str(config.path))
-    model_settings = (
-        {k: v for k, v in body.items() if k != "messages"}
-        if isinstance(body, dict)
-        else {}
-    )
-    rule_scope = digest({"function": scope, "settings": model_settings})
-    learned = (
-        store.learned(rule_scope) if llm and config.mode == "risky" else ()
-    )
-    normalized = (
-        normalize(body, config.mode, config.rules, learned)
+    if store is None:
+        store = get_store(str(config.path))
+    normalized = None
+    matching_scope = (
+        matching.scope_key(
+            scope, body, config, include_roles=not config.structural_matching
+        )
         if llm
-        else Normalized(body, {}, [])
-    )
-    if diagnostic is not None:
-        diagnostic.learned = learned
-    learning_scope = (
-        learning.scope_key(scope, body, config)
-        if llm and config.mode == "testing" and config.learning
+        and config.mode in ("testing", "risky")
+        and (config.learning or config.metadata_rules)
         else None
     )
     diagnostic_scope = (
         digest(
             {
                 "diagnostics": 1,
-                "scope": learning.scope_key(scope, body, config)
+                "scope": matching.scope_key(
+                    scope, body, config, include_roles=False
+                )
                 or {
                     "scope": scope,
                     "mode": config.mode,
@@ -242,12 +274,11 @@ def prepare(body, scope, config, llm, verifier=None):
             "scope": scope,
             "mode": config.mode if llm else "exact",
             "rules": [asdict(rule) for rule in config.rules],
-            "learning": bool(learning_scope),
-            "input": normalized.body,
+            "learning": bool(matching_scope),
+            "input": body,
+            "policy": matching.policy(config) if llm else None,
         }
     )
-    if normalized.learned:
-        store.learn(rule_scope, normalized.learned)
     owner, deadline = uuid.uuid4().hex, time.monotonic() + config.wait_seconds
     random_draw = random.random()
     while True:
@@ -271,33 +302,23 @@ def prepare(body, scope, config, llm, verifier=None):
                     ):
                         rejection_reason = "validator_rejected"
                         raise ValueError("Validator rejected the candidate")
-                    rejection_reason = "rebind_failed"
-                    result = rebind(
-                        payload["result"],
-                        payload["bindings"],
-                        normalized.bindings,
-                    )
+                    rejection_reason = "input_changed"
+                    if dumps(payload["input"]) != dumps(body):
+                        raise ValueError("Stored input differs from exact key")
+                    result = payload["result"]
                     # Check decoding before advertising a hit.
                     rejection_reason = "decode_failed"
                     adapters.unpack(result)
                 except Exception as exc:
                     rejected = True
                     if diagnostic is not None:
-                        details = (
-                            binding_summary(
-                                payload.get("bindings", {}), normalized.bindings
-                            )
-                            if rejection_reason == "rebind_failed"
-                            else {}
-                        )
                         diagnostic.reject(
                             key,
                             rejection_reason,
                             error=type(exc).__name__,
-                            **details,
                         )
                 else:
-                    decision(
+                    record(
                         "hit",
                         "normalized" if payload["input"] != body else "exact",
                         config,
@@ -308,6 +329,12 @@ def prepare(body, scope, config, llm, verifier=None):
                 diagnostic.reject(
                     key, "refresh", refresh_probability=probability
                 )
+        if normalized is None:
+            normalized = (
+                normalize(body, config.mode, config.rules)
+                if diagnostic is not None
+                else Normalized(body, {})
+            )
         if store.claim(key, owner, config.lease_seconds):
             # Another producer may have committed between get() and claim().
             # Recheck under our lease before making a duplicate upstream call.
@@ -315,23 +342,31 @@ def prepare(body, scope, config, llm, verifier=None):
             if latest != entry:
                 store.release(key, owner)
                 continue
-            if entry is None and learning_scope and verifier:
+            if (
+                entry is None
+                and matching_scope
+                and (verifier or config.metadata_rules)
+            ):
                 try:
-                    result = learning.lookup(
+                    result = matching.lookup(
                         store,
-                        learning_scope,
+                        matching_scope,
                         body,
                         normalized,
                         config,
                         verifier,
                         diagnostic=diagnostic,
+                        fingerprints=signature_info[1]
+                        if signature_info
+                        else None,
                     )
                     if result is not None:
+                        result, reuse_reason = result
                         adapters.unpack(result)
-                        # Keep the original entry's age for learned reuse: a new
+                        # Keep the original entry's age for pair reuse: a new
                         # input must not renew an old answer's freshness window.
                         store.release(key, owner)
-                        decision("hit", "verified_rule", config, key)
+                        record("hit", reuse_reason, config, key)
                         return None, result
                 except BaseException:
                     store.release(key, owner)
@@ -354,8 +389,9 @@ def prepare(body, scope, config, llm, verifier=None):
                 body,
                 normalized,
                 config,
-                learning_scope,
+                matching_scope,
                 diagnostic_scope,
+                signature_info,
             ), None
         if time.monotonic() >= deadline:
             miss("busy", key)
@@ -490,7 +526,7 @@ def decorate(function, llm, overrides, version):
             verifier is None
             and llm
             and config.learning
-            and config.mode == "testing"
+            and config.mode in ("testing", "risky")
         ):
             verifier = functools.partial(
                 adapters.verify_function, function, args, kwargs, body
@@ -538,7 +574,7 @@ def decorate(function, llm, overrides, version):
             llm
             and verifier is None
             and config.learning
-            and config.mode == "testing"
+            and config.mode in ("testing", "risky")
         ):
             loop = asyncio.get_running_loop()
 
@@ -656,7 +692,7 @@ def cached_llm_response(
         version: Explicit cache version for changes to hidden dependencies.
         verifier_overrider: Optional replacement for built-in verification.
             Receives evidence including default instructions and returns a dict
-            with safe_to_reuse (bool) and reason (str), synchronously. By default,
+            with safe_to_reuse (bool), reason (str), and segments (all indexes), synchronously. By default,
             supported chat wrappers use the package prompt and original function.
         **options: Config fields such as path, min_words, refresh_start, and
             refresh_force; namespace additionally separates caches.

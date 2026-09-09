@@ -10,14 +10,14 @@ from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 
-from .config import Rule
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entries (key TEXT PRIMARY KEY, created REAL NOT NULL, payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS leases (key TEXT PRIMARY KEY, owner TEXT NOT NULL, expires REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS rules (scope TEXT NOT NULL, rule TEXT NOT NULL, PRIMARY KEY(scope, rule));
 CREATE TABLE IF NOT EXISTS candidates (scope TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(scope, key));
-CREATE TABLE IF NOT EXISTS verified_rules (key TEXT NOT NULL, rule TEXT NOT NULL, PRIMARY KEY(key, rule));
+CREATE TABLE IF NOT EXISTS signature_counts (scope TEXT NOT NULL, kind TEXT NOT NULL, signature TEXT NOT NULL, requests INTEGER NOT NULL, hits INTEGER NOT NULL, misses INTEGER NOT NULL, first_seen REAL NOT NULL, last_seen REAL NOT NULL, PRIMARY KEY(scope, kind, signature));
+CREATE TABLE IF NOT EXISTS signature_entries (scope TEXT NOT NULL, kind TEXT NOT NULL, signature TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(scope, kind, key));
+CREATE TABLE IF NOT EXISTS reviews (key TEXT PRIMARY KEY, expires REAL NOT NULL, payload TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS signature_lookup ON signature_entries(scope, kind, signature);
 """
 _stores_lock = threading.Lock()
 
@@ -91,33 +91,6 @@ class Store:
                 "DELETE FROM leases WHERE key=? AND owner=?", (key, owner)
             )
 
-    def learned(self, scope):
-        with self.connect() as db:
-            rows = db.execute(
-                "SELECT rule FROM rules WHERE scope=? ORDER BY rule", (scope,)
-            ).fetchall()
-        return [Rule(**json.loads(row[0])) for row in rows]
-
-    def learn(self, scope, rules):
-        with self.connect() as db:
-            db.executemany(
-                "INSERT OR IGNORE INTO rules VALUES (?, ?)",
-                [
-                    (
-                        scope,
-                        json.dumps(
-                            {
-                                "name": r.name,
-                                "pattern": r.pattern,
-                                "paths": r.paths,
-                            },
-                            sort_keys=True,
-                        ),
-                    )
-                    for r in rules
-                ],
-            )
-
     def index(self, scope, key):
         with self.connect() as db:
             db.execute(
@@ -136,26 +109,86 @@ class Store:
             for key, created, payload in rows
         ]
 
-    def verified(self, key):
+    def review(
+        self, key, payload=None, expires=None, *, resolve_conflicts=False
+    ):
+        """Bounded, expiring decisions; conflicting writes remain uncertain."""
         with self.connect() as db:
-            rows = db.execute(
-                "SELECT rule FROM verified_rules WHERE key=?", (key,)
-            ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+            db.execute("DELETE FROM reviews WHERE expires <= ?", (time.time(),))
+            if payload is not None:
+                if resolve_conflicts:
+                    prior = db.execute(
+                        "SELECT payload FROM reviews WHERE key=?", (key,)
+                    ).fetchone()
+                    if (
+                        prior
+                        and json.loads(prior[0])["decision"]
+                        != payload["decision"]
+                    ):
+                        payload = {"decision": "UNCERTAIN"}
+                db.execute(
+                    "INSERT OR REPLACE INTO reviews VALUES (?, ?, ?)",
+                    (key, expires, json.dumps(payload)),
+                )
+                db.execute(
+                    "DELETE FROM reviews WHERE key IN (SELECT key FROM reviews ORDER BY expires DESC, key LIMIT -1 OFFSET 4096)"
+                )
+            row = db.execute(
+                "SELECT payload FROM reviews WHERE key=?", (key,)
+            ).fetchone()
+        return json.loads(row[0]) if row else None
 
-    def approve(self, key, rule):
+    def count_signatures(self, scope, signatures, hit):
+        now = time.time()
         with self.connect() as db:
-            db.execute(
-                "INSERT OR IGNORE INTO verified_rules VALUES (?, ?)",
-                (key, json.dumps(rule, sort_keys=True)),
+            db.executemany(
+                "INSERT INTO signature_counts VALUES (?, ?, ?, 1, ?, ?, ?, ?) "
+                "ON CONFLICT(scope, kind, signature) DO UPDATE SET "
+                "requests=requests+1, hits=hits+excluded.hits, "
+                "misses=misses+excluded.misses, last_seen=excluded.last_seen",
+                [
+                    (scope, kind, value, int(hit), int(not hit), now, now)
+                    for kind, value in signatures.items()
+                ],
             )
 
-    def revoke(self, key, rule):
+    def index_signatures(self, scope, signatures, key):
         with self.connect() as db:
-            db.execute(
-                "DELETE FROM verified_rules WHERE key=? AND rule=?",
-                (key, json.dumps(rule, sort_keys=True)),
+            db.executemany(
+                "INSERT OR REPLACE INTO signature_entries VALUES (?, ?, ?, ?)",
+                [
+                    (scope, kind, value, key)
+                    for kind, value in signatures.items()
+                ],
             )
+
+    def signature_candidates(self, scope, signatures, limit):
+        found = {}
+        # The lexical bucket preserves known words and gets first priority.
+        for kind, value in reversed(list(signatures.items())):
+            with self.connect() as db:
+                rows = db.execute(
+                    "SELECT e.key, e.created, e.payload FROM signature_entries s "
+                    "JOIN entries e ON e.key=s.key "
+                    "WHERE s.scope=? AND s.kind=? AND s.signature=? "
+                    "ORDER BY e.created DESC, e.key LIMIT ?",
+                    (scope, kind, value, limit),
+                ).fetchall()
+            for key, created, payload in rows:
+                found.setdefault(key, (key, created, json.loads(payload), kind))
+        for key, created, payload in self.candidates(scope, limit):
+            found.setdefault(key, (key, created, payload, "recent"))
+        return list(found.values())
+
+    def signature_stats(self, limit=20):
+        with self.connect() as db:
+            cursor = db.execute(
+                "SELECT * FROM signature_counts ORDER BY requests DESC, "
+                "scope, kind, signature LIMIT ?",
+                (limit,),
+            )
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
 @lru_cache(maxsize=32)

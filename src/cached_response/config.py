@@ -44,6 +44,19 @@ class Rule:
     pattern: str
     paths: tuple[str, ...] = ("messages.*.content",)
 
+    @classmethod
+    def preset(cls, name, *, paths):
+        """Recognize a value format; the caller must establish its irrelevance."""
+        from .normalize import ISO_TIME, UUID
+
+        patterns = {
+            "uuid": UUID,
+            "iso_time": ISO_TIME,
+            "hex_id": r"[A-Fa-f0-9]{8,128}",
+            "digits": r"[0-9]{1,32}",
+        }
+        return cls(name, patterns[name], tuple(paths))
+
 
 @dataclass(frozen=True)
 class Config:
@@ -64,6 +77,8 @@ class Config:
     wait_seconds: float = 300
     report: bool = False
     diagnostics: bool = True
+    signature_matching: bool = False
+    structural_matching: bool = False
     diagnostic_text: bool = False
     near_miss_threshold: float = 0.90
     rules: tuple[Rule, ...] = ()
@@ -72,10 +87,21 @@ class Config:
     verifier_overrider: Callable | None = field(
         default=None, compare=False, repr=False
     )
-    verifier_timeout: float = 90
-    learning_recheck: float = 0
+    metadata_paths: tuple[str, ...] = ()
+    metadata_rules: tuple[Rule, ...] = ()
+    diagnostic_capture: Callable | None = field(
+        default=None, compare=False, repr=False
+    )
+    verifier_model: str | None = None
+    verifier_options: dict = field(default_factory=dict)
+    verifier_version: str = "1"
+    verifier_timeout: float = 10
 
     def __post_init__(self):
+        if self.signature_matching and self.mode != "disabled":
+            from .signatures import vocabulary
+
+            vocabulary()
         if not 0 <= self.near_miss_threshold <= 1:
             raise ValueError("near_miss_threshold must be between 0 and 1")
         for name in (
@@ -100,10 +126,18 @@ class Config:
             <= 0
         ):
             raise ValueError("Size and timeout limits must be positive")
-        if self.verifier_timeout <= 0 or not 0 <= self.learning_recheck <= 1:
+        if any(not isinstance(p, str) or not p for p in self.metadata_paths):
             raise ValueError(
-                "Require verifier_timeout > 0 and learning_recheck between 0 and 1"
+                "metadata_paths must contain nonempty dotted paths"
             )
+        if not isinstance(self.verifier_options, dict):
+            raise ValueError("verifier_options must be a dictionary")
+        if self.verifier_timeout <= 0:
+            raise ValueError("Require verifier_timeout > 0")
+        for rule in self.metadata_rules:
+            re.compile(rule.pattern)
+            if not rule.paths or any(not p for p in rule.paths):
+                raise ValueError("metadata_rules require explicit paths")
 
 
 _config = Config()

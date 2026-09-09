@@ -6,6 +6,15 @@ from pathlib import Path
 
 import pytest
 
+
+def test_excerpt_does_not_reveal_new_interior_edges():
+    from cached_response.diagnostics import differences
+    before = 'A' * 170 + 'LEAK' + 'X' * 26 + 'old' + 'B' * 200
+    after = 'A' * 170 + 'LEAK' + 'X' * 26 + 'new' + 'B' * 200
+    change = differences(before, after)[0][0]
+    assert change['before'] == '*' * 160
+    assert change['after'] == '*' * 160
+
 from cached_response import (
     cache_misses,
     cache_stats,
@@ -16,7 +25,7 @@ from cached_response import decorators, diagnostics
 from cached_response.config import Config
 from cached_response.diagnostics import differences, prompt_stats, redact
 from cached_response.storage import get_store
-from test_learning import request
+from test_matching import request
 
 
 @pytest.fixture(autouse=True)
@@ -92,12 +101,12 @@ def test_verifier_miss_example_stats_and_file_are_redacted(tmp_path, capsys):
     def verify(evidence):
         judges.append(evidence)
         return {
-            "safe_to_reuse": False,
+            "safe_to_reuse": False, "segments": [0],
             "reason": "alice@example.com needs live state",
         }
 
     @cached_llm_response(
-        mode="testing", path=tmp_path / "cache.db", verifier_overrider=verify
+        metadata_paths=("messages.*.content",), mode="testing", path=tmp_path / "cache.db", verifier_overrider=verify
     )
     def ask(body):
         calls.append(body)
@@ -111,7 +120,7 @@ def test_verifier_miss_example_stats_and_file_are_redacted(tmp_path, capsys):
     candidate = example["candidates"][0]
     assert candidate["reason"] == "verifier_rejected"
     assert candidate["high_similarity"]
-    assert candidate["differences"][0]["path"] == ["messages", 0, "content"]
+    assert candidate["differences"][0]["path"] == ["messages", 2, "content"]
     assert "*" in candidate["differences"][0]["before"]
     assert " " in candidate["differences"][0]["before"]
     assert candidate["checks"][-1]["verifier_reason"] == (
@@ -145,9 +154,9 @@ def test_verifier_miss_example_stats_and_file_are_redacted(tmp_path, capsys):
         ("validator_error", "validator_error"),
         ("verifier_error", "verifier_error"),
         ("invalid", "invalid_verdict"),
-        ("references", "output_references_changed_value"),
-        ("proportion", "change_fraction_too_large"),
-        ("structure", "proposal_rejected"),
+        ("references", "metadata_reference_present"),
+        ("proportion", "undeclared_or_meaningful_change"),
+        ("structure", "undeclared_or_meaningful_change"),
         ("refresh", "refresh"),
     ],
 )
@@ -155,7 +164,7 @@ def test_candidate_rejection_reasons(tmp_path, case, expected):
     def fail(*args):
         raise ValueError("secret@example.com")
 
-    options = {"mode": "testing", "path": tmp_path / "cache.db"}
+    options = {"mode": "testing", "path": tmp_path / "cache.db", "metadata_paths": ("messages.*.content",)}
     options["verifier_overrider"] = (
         fail if case == "verifier_error" else lambda _: {}
     )
@@ -166,9 +175,11 @@ def test_candidate_rejection_reasons(tmp_path, case, expected):
 
     @cached_llm_response(**options)
     def ask(body):
-        return "The day is 07." if case == "references" else "inspect"
+        return "Inspect job_ab12cd34." if case == "references" else "inspect"
 
     before, after = request("07"), request("08")
+    if case == "references":
+        before["messages"][-1]["content"] = "job_ab12cd34"
     if case == "proportion":
         before, after = (
             request("07", user="1"),
@@ -196,7 +207,7 @@ def test_similarity_does_not_enable_reuse_and_respects_scope(tmp_path):
         calls.append(body)
         return "fresh"
 
-    options = {"mode": "conservative", "path": tmp_path / "cache.db"}
+    options = {"mode": "conservative", "path": tmp_path / "cache.db", "metadata_paths": ("messages.*.content",)}
     ask = cached_llm_response(**options)(upstream)
     ask(request("07"))
     ask(request("08"))
@@ -245,14 +256,10 @@ def test_rebinding_miss_explains_changed_identifier_relationships(tmp_path):
     new = request("07", user="Inspect job_ef56ab78 and job_0123abcd")
     ask(old)
     ask(new)
-    check = cache_misses(1)[0]["candidates"][0]["checks"][-1]
-    assert check == {
-        "reason": "rebind_failed",
-        "error": "ValueError",
-        "previous_reference_count": 1,
-        "current_reference_count": 2,
-        "reference_structure_matches": False,
-    }
+    check = cache_misses(1)[0]["candidates"][0]["checks"][0]
+    assert check['reason'] == 'undeclared_or_meaningful_change'
+    assert check['path'] == ['messages', 1, 'content']
+
 
 
 def test_examples_bounded_and_raw_text_is_explicit(tmp_path):
