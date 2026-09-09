@@ -288,3 +288,58 @@ def rebind(value, previous, current):
         return item
 
     return walk(value)
+
+
+def translate(value, mapping):
+    """Translate explicit opaque test handles, preserving JSON text and signatures."""
+    pairs = {a: b for a, b in mapping.items() if a != b}
+    if not pairs:
+        return value
+    pattern = re.compile(
+        r"(?<!\w)(?:" + "|".join(map(re.escape, pairs)) + r")(?!\w)"
+    )
+
+    def check_nested(item):
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if any(old in key for old in pairs):
+                    raise ValueError("Test ID in a dictionary key")
+                if key in PROTECTED and pattern.search(dumps(child)):
+                    raise ValueError(
+                        "Test ID occurs inside opaque provider state"
+                    )
+                check_nested(child)
+        elif isinstance(item, list):
+            for child in item:
+                check_nested(child)
+
+    def walk(item):
+        if isinstance(item, dict):
+            if any(old in key for key in item for old in pairs):
+                raise ValueError("Test ID in a dictionary key")
+            return {
+                k: v if k in PROTECTED else walk(v) for k, v in item.items()
+            }
+        if isinstance(item, list):
+            return [walk(v) for v in item]
+        if not isinstance(item, str):
+            return item
+        spans = {m.span() for m in pattern.finditer(item)}
+        if any(
+            m.span() not in spans
+            for old in pairs
+            for m in re.finditer(re.escape(old), item)
+        ):
+            raise ValueError("Test ID is embedded in another token")
+        if not spans:
+            return item
+        if THOUGHT_SEPARATOR in item:
+            raise ValueError("Cannot translate a signed provider token")
+        try:
+            nested = json.loads(item)
+        except ValueError:
+            nested = None
+        check_nested(nested)
+        return pattern.sub(lambda m: pairs[m[0]], item)
+
+    return walk(value)
