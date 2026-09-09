@@ -11,6 +11,7 @@ from cached_response.adapters import verification_body, pack
 from cached_response.config import Config
 from cached_response.matching import prepare, PairRejected, valid_pattern
 from cached_response.storage import get_store
+from cached_response.normalize import normalize, rebind
 
 
 def body(trace='trace_old', **fields):
@@ -134,6 +135,34 @@ def test_metadata_guards_hold_even_with_overbroad_declaration(kind):
         prepare(a, b, response, Config(metadata_paths=('messages.*.content.*',)))
 
 
+@pytest.mark.parametrize('field', [
+    'thought_signature', 'thoughtSignature', 'thought_signatures', 'thoughtSignatures',
+])
+def test_signature_fields_never_become_declared_metadata(field):
+    # A permissive path declaration must not authorize different reasoning state.
+    old, new = body(**{field: ['state_old']}), body(**{field: ['state_new']})
+    with pytest.raises(PairRejected, match='pair_provider_state_changed'):
+        prepare(old, new, pack('inspect blue'),
+                Config(metadata_paths=('messages.*.content.*',)))
+
+
+@pytest.mark.parametrize('field', [
+    'thought_signature', 'thoughtSignature', 'thought_signatures', 'thoughtSignatures',
+])
+def test_normalization_and_rendering_preserve_signature_bytes(field):
+    old, new = 'task_ab12cd34', 'task_ef56ab78'
+    # An opaque signature may contain a substring that looks like an ID.
+    payload = {'text': old, field: [old]}
+    request = {'messages': [{'role': 'tool', 'content': json.dumps(payload)}]}
+    normalized = normalize(request, 'testing')
+    content = json.loads(normalized.body['messages'][0]['content'])
+    assert content[field] == [old]
+    assert content['text'] != old
+    assert rebind(payload, {'task': old}, {'task': new}) == {
+        'text': new, field: [old],
+    }
+
+
 def test_timeout_falls_back_without_late_approval(tmp_path):
     gate, finished = threading.Event(), threading.Event()
     def judge(e):
@@ -198,3 +227,150 @@ def test_custom_reviewer_cannot_mutate_caller_or_cached_response(tmp_path):
     snapshot = copy.deepcopy(request)
     assert ask(request) == 'Read current state for blue.'
     assert request == snapshot and len(calls) == 1
+
+
+def candidate_lookup(tmp_path, judge, **options):
+    """Exercise learning against one retained source, without new upstream entries."""
+    from cached_response.matching import lookup, metadata_scope
+    from cached_response.normalize import dumps
+    config = Config(mode='testing', min_words=0,
+                    metadata_paths=('messages.*.content.trace',), **options)
+    store = get_store(str(tmp_path/'reviews.db'))
+    store.claim('source', 'test', 30)
+    store.put('source', 'test', dumps({'input': body(), 'result': pack('Read blue.')}))
+    store.index('caller', 'source')
+    store.index(metadata_scope('caller', body(), config), 'source')
+    def find(request, scope='caller'):
+        return lookup(store, scope, request, None, config, judge)
+    return find, store
+
+
+@pytest.mark.parametrize('outcome', ['SAFE', 'UNSAFE'])
+def test_decisive_rules_skip_later_judge_and_persist(tmp_path, outcome):
+    calls = []
+    def judge(e):
+        calls.append(e)
+        return {'decision': outcome, 'reason': 'Reviewed this field.', 'segments': [0],
+                'patterns': [{'segment': 0, 'pattern': r'\Atrace_[a-z]{1,32}\Z'}]}
+    find, store = candidate_lookup(tmp_path, judge)
+    assert bool(find(body('trace_new'))) == (outcome == 'SAFE')
+    assert bool(find(body('trace_third'))) == (outcome == 'SAFE')
+    assert len(calls) == 1
+    # A separate connection sees decisions on disk, without raw values/reasons.
+    from cached_response.storage import Store
+    with Store(store.path).connect() as db:
+        rows = [json.loads(r[0]) for r in db.execute('SELECT payload FROM reviews')]
+    assert len(rows) == 2 and all(r['decision'] == outcome for r in rows)
+    assert 'trace_new' not in json.dumps(rows)
+    assert find(body('trace_fourth'), scope='other-caller') is None
+    assert len(calls) == 1
+    # Same shape alone cannot cover an unseen format: fall through to the judge.
+    find(body('TRACE_new'))
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('verdict_fields', [
+    {'decision': 'UNCERTAIN'}, {'safe_to_reuse': False},
+    {'decision': 'SAFE', 'safe_to_reuse': False}, {'decision': 'safe'},
+    {'decision': True}, {'decision': None},
+])
+def test_uncertain_or_invalid_decisions_do_not_persist(tmp_path, verdict_fields):
+    calls = []
+    def judge(e):
+        calls.append(e)
+        return {**verdict_fields, 'reason': 'Not enough evidence.', 'segments': [0],
+                'patterns': [{'segment': 0, 'pattern': r'\Atrace_[a-z]{1,32}\Z'}]}
+    find, store = candidate_lookup(tmp_path, judge)
+    assert find(body('trace_new')) is None
+    assert find(body('trace_new')) is None
+    assert len(calls) == 2
+    with store.connect() as db:
+        assert db.execute('SELECT count(*) FROM reviews').fetchone()[0] == 0
+
+
+def test_unsafe_pair_without_pattern_does_not_poison_other_pairs(tmp_path):
+    calls = []
+    def judge(e):
+        calls.append(e)
+        return {'decision': 'UNSAFE', 'reason': 'Meaningful label.', 'segments': [0]}
+    find, store = candidate_lookup(tmp_path, judge)
+    assert find(body('trace_new')) is None
+    assert find(body('trace_new')) is None
+    assert len(calls) == 1
+    assert find(body('trace_third')) is None
+    assert len(calls) == 2
+    with store.connect() as db:
+        db.execute('UPDATE reviews SET expires=0')
+    find(body('trace_new'))
+    assert len(calls) == 3
+
+
+def test_learned_rule_cannot_override_changed_fact_or_reference(tmp_path):
+    calls = []
+    def judge(e):
+        calls.append(e)
+        return {'decision': 'SAFE', 'reason': 'Trace only.', 'segments': [0],
+                'patterns': [{'segment': 0, 'pattern': r'\Atrace_[a-z]{1,32}\Z'}]}
+    find, _ = candidate_lookup(tmp_path, judge)
+    assert find(body('trace_new'))
+    assert find(body('trace_third', owner='green')) is None
+    changed = body('trace_fourth')
+    changed['messages'][0]['content'] = 'Delete all resources.'
+    assert find(changed) is None
+    changed = body('trace_fifth')
+    changed['messages'][1]['content'] = 'Inspect trace_fifth.'
+    assert find(changed) is None
+    assert len(calls) == 1
+
+
+def test_conflicting_decisions_atomically_become_uncertain(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from cached_response.storage import Store
+    path = tmp_path/'conflicts.db'
+    Store(path)
+    def write(outcome):
+        return Store(path).review('rule', {'decision': outcome}, time.time()+30,
+                                  resolve_conflicts=True)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(write, ['SAFE', 'UNSAFE']))
+    assert Store(path).review('rule') == {'decision': 'UNCERTAIN'}
+    assert write('SAFE') == {'decision': 'UNCERTAIN'}
+
+
+def test_conflicting_rule_falls_through_even_with_approved_pair(tmp_path):
+    calls = []
+    def judge(e):
+        calls.append(e)
+        return {'decision': 'SAFE' if len(calls) == 1 else 'UNCERTAIN',
+                'reason': 'Review.', 'segments': [0],
+                'patterns': [{'segment': 0, 'pattern': r'\Atrace_[a-z]{1,32}\Z'}]}
+    find, store = candidate_lookup(tmp_path, judge)
+    assert find(body('trace_new'))
+    with store.connect() as db:
+        key = next(k for k,p in db.execute('SELECT key,payload FROM reviews')
+                   if 'patterns' in json.loads(p))
+    store.review(key, {'decision': 'UNSAFE'}, time.time()+30, resolve_conflicts=True)
+    assert find(body('trace_new')) is None
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('pattern', [
+    r'\Atrace_[A-Za-z0-9]{1,64}\Z', r'\At_[0-9a-f]{8}\Z',
+    r'\Ajob-[A-Fa-f0-9]{8,32}\Z',
+])
+def test_bounded_literal_prefix_patterns(pattern):
+    import re
+    # These are syntax checks only; a matching ID format never grants eligibility.
+    value = pattern[2:pattern.index('[')] + 'abcd1234'
+    assert re.fullmatch(pattern, value)
+    assert valid_pattern(pattern, value, value)
+    assert not valid_pattern(pattern, value, 'x'+value)
+
+
+@pytest.mark.parametrize('pattern', [
+    r'\Atrace.*[a-z]{1,32}\Z', r'\A(trace_)?[a-z]{1,32}\Z',
+    r'\Atrace_[a-z]+\Z', r'\Atrace_[a-z]{0,128}\Z',
+    r'\A' + 'a'*33 + r'[a-z]{1,32}\Z',
+])
+def test_literal_prefix_does_not_allow_regex_operators(pattern):
+    assert not valid_pattern(pattern, 'trace_old', 'trace_new')

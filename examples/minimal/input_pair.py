@@ -1,4 +1,4 @@
-"""Demonstrate specific-pair approval with a deterministic local test verifier."""
+"""Learn a SAFE metadata rule with a deterministic local test verifier."""
 
 import json
 from pathlib import Path
@@ -28,9 +28,10 @@ def test_verifier(evidence):
     # A fixture for this example, not a production equivalence validator.
     reviews.append(evidence["verification_kind"])
     return {
-        "safe_to_reuse": True,
+        "decision": "SAFE",
         "segments": [0],
         "reason": "Approve this synthetic test pair.",
+        "patterns": [{"segment": 0, "pattern": r"\Atrace_[a-z]{1,32}\Z"}],
     }
 
 
@@ -47,8 +48,9 @@ with TemporaryDirectory(prefix="cached-response-pair-") as directory:
         print("upstream executed")
         return {"action": "inspect", "target": "job_ab12cd34"}
 
-    ask(request("job_ab12cd34", "No trace."))
-    result = ask(request("job_ab12cd34", "Trace trace_0123abcd was recorded."))
+    ask(request("job_ab12cd34", "trace_old"))
+    ask(request("job_ab12cd34", "trace_new"))
+    result = ask(request("job_ab12cd34", "trace_third"))
     stats = cache_stats()
     print(
         json.dumps(
@@ -58,6 +60,7 @@ with TemporaryDirectory(prefix="cached-response-pair-") as directory:
                 "requests": stats["requests"],
                 "hits": stats["hit"],
                 "misses": stats["miss"],
+                "hit_reasons": stats["hit_reasons"],
             },
             indent=2,
         )

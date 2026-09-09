@@ -28,14 +28,14 @@ by default.
 | --- | --- |
 | `disabled` (default) | Always calls your function. Keep this in production. |
 | `conservative` | Exact input matches only. |
-| `testing` | Exact matches, plus guarded review of declared metadata changes. |
+| `testing` | Exact matches, optional test-ID aliases, and guarded metadata review. |
 | `risky` | Same safeguards as `testing`; retained for compatibility. |
 
 ### Matching in three rules
 
 1. Reuse exact inputs only within the same caller, settings, policy, and freshness window.
 2. Find similar candidates, but reject every change outside explicitly declared irrelevant metadata.
-3. Reuse reviewed metadata rules, or ask a fast model and save its scoped approval.
+3. Apply scoped SAFE or UNSAFE rules; ask the judge when uncertain, and save eligible decisions.
 
 Responses use exact input keys. Regexes recognize UUIDs, timestamps, and generated
 IDs for candidate search only. Optional masked and NLTK word signatures find more
@@ -45,7 +45,13 @@ For broader matching, declare specific string fields whose values cannot change
 the answer or action. Only tool content and top-level `metadata` are eligible.
 Instructions, resource targets, facts, types, message order and provider state
 stay exact. Changed metadata referenced elsewhere or in the response causes a miss.
-The package never substitutes resource IDs in an old answer.
+Resource IDs are never interchangeable merely because they share a format.
+
+The judge can teach a bounded regex: **SAFE** reuses that candidate; **UNSAFE**
+rejects it. An unknown or conflicting rule asks the judge. If the judge is still
+**UNCERTAIN**, the original model runs and no rule is learned. Rules stay tied to
+the same caller, unchanged context, response and policy. See
+[how learning works](docs/learning-from-misses.md#learn-safe-and-unsafe-decisions).
 
 ```python
 @cached_llm_response(

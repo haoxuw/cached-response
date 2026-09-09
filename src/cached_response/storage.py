@@ -109,11 +109,23 @@ class Store:
             for key, created, payload in rows
         ]
 
-    def review(self, key, payload=None, expires=None):
-        """Bounded, expiring approvals/rules; never renew the source response age."""
+    def review(
+        self, key, payload=None, expires=None, *, resolve_conflicts=False
+    ):
+        """Bounded, expiring decisions; conflicting writes remain uncertain."""
         with self.connect() as db:
             db.execute("DELETE FROM reviews WHERE expires <= ?", (time.time(),))
             if payload is not None:
+                if resolve_conflicts:
+                    prior = db.execute(
+                        "SELECT payload FROM reviews WHERE key=?", (key,)
+                    ).fetchone()
+                    if (
+                        prior
+                        and json.loads(prior[0])["decision"]
+                        != payload["decision"]
+                    ):
+                        payload = {"decision": "UNCERTAIN"}
                 db.execute(
                     "INSERT OR REPLACE INTO reviews VALUES (?, ?, ?)",
                     (key, expires, json.dumps(payload)),

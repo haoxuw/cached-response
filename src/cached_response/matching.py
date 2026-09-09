@@ -28,14 +28,17 @@ relationships or output references, even if a field was mistakenly declared meta
 A UUID, date, random-looking token or similar spelling does not establish safety.
 Good: a diagnostic trace label changes, with the same target, facts and answer.
 Bad: a resource UUID changes owner; an expiry changes validity; a task is completed.
-If uncertain or context is insufficient, reject. Give a brief reason, no reasoning
-trace. Approve only this concrete pair. Return ONLY JSON:
-{"safe_to_reuse": false, "reason": "brief reason", "segments": [0], "patterns": []}
+Return SAFE only for equivalent pairs, UNSAFE for a known meaningful difference,
+or UNCERTAIN when context or confidence is insufficient. Give a brief reason, no
+reasoning trace. Return ONLY JSON:
+{"decision": "UNCERTAIN", "reason": "brief reason", "segments": [0], "patterns": []}
 segments must list EVERY supplied segment index exactly once. Optionally suggest
 one pattern per segment using {"segment": 0, "pattern": "..."}. Only anchored
-bounded character classes are supported: \\A[0-9]{1,32}\\Z or
-\\A[A-Za-z0-9_-]{1,64}\\Z. Suggestions can apply only to declared metadata, under
-identical surrounding input, cached response and policy. Never suggest a rule
+bounded character classes with an optional literal prefix are supported:
+\\A[0-9]{1,32}\\Z or \\Atrace_[A-Za-z0-9]{1,64}\\Z. Suggest patterns for SAFE or
+UNSAFE only when the SAME decision holds throughout that range. Never generalize
+from uncertainty or format alone. Suggestions apply only to declared metadata, under
+identical surrounding input, cached response and policy. Never suggest a SAFE rule
 for meaningful fields. Patterns are optional and do not authorize reuse themselves.
 """
 
@@ -235,11 +238,11 @@ def prepare(old, new, response, config):
 
 
 def valid_pattern(pattern, old, new):
-    """No regex operators beyond one bounded, allowlisted character class."""
+    """Only a short literal prefix and one bounded, allowlisted class."""
     if not isinstance(pattern, str):
         return False
     match = re.fullmatch(
-        r"\\A(\[(?:0-9|a-z|A-Z|A-Za-z|A-Za-z0-9|A-Za-z0-9_-|a-z0-9_-)\])\{(\d{1,3})(?:,(\d{1,3}))?\}\\Z",
+        r"\\A[A-Za-z0-9_-]{0,32}(\[(?:0-9|a-z|A-Z|A-Za-z|A-Za-z0-9|A-Za-z0-9_-|a-z0-9_-|A-Fa-f0-9|0-9a-f)\])\{(\d{1,3})(?:,(\d{1,3}))?\}\\Z",
         pattern,
     )
     return bool(
@@ -248,6 +251,29 @@ def valid_pattern(pattern, old, new):
         and re.fullmatch(pattern, old)
         and re.fullmatch(pattern, new)
     )
+
+
+def decision(verdict, count):
+    """Validate full coverage; old boolean rejections do not teach UNSAFE."""
+    if not (
+        isinstance(verdict, dict)
+        and isinstance(verdict.get("reason"), str)
+        and isinstance(verdict.get("segments"), list)
+        and all(type(i) is int for i in verdict["segments"])
+        and verdict["segments"] == list(range(count))
+    ):
+        return None
+    value = verdict.get("decision")
+    legacy = verdict.get("safe_to_reuse")
+    if "decision" not in verdict and type(legacy) is bool:
+        return "SAFE" if legacy else "UNCERTAIN"
+    if value not in ("SAFE", "UNSAFE", "UNCERTAIN"):
+        return None
+    if "safe_to_reuse" in verdict and (
+        type(legacy) is not bool or legacy != (value == "SAFE")
+    ):
+        return None
+    return value
 
 
 def review(verifier, request, timeout):
@@ -346,6 +372,7 @@ def lookup(
                 reject("verification_disabled")
                 continue
             base = {
+                "review_format": 2,
                 "scope": scope,
                 "policy": policy(config),
                 "source": key,
@@ -355,18 +382,32 @@ def lookup(
             }
             pair_key = digest({**base, "pair": body})
             rule_key = digest({**base, "paths": [s["path"] for s in segments]})
-            if store.review(pair_key):
-                return result, "approved_pair"
+            pair = store.review(pair_key)
             learned = store.review(rule_key)
-            if (
-                learned
-                and len(learned) == len(segments)
+            patterns = learned.get("patterns", []) if learned else []
+            covered = (
+                bool(patterns)
+                and len(patterns) == len(segments)
                 and all(
                     valid_pattern(p, s["old"], s["new"])
-                    for p, s in zip(learned, segments)
+                    for p, s in zip(patterns, segments)
                 )
-            ):
-                return result, "learned_metadata"
+            )
+            # A conflicting learned decision stays uncertain until expiry or a
+            # policy change. Neither a positive pair nor a regex overrides it.
+            decisions = set()
+            if pair:
+                decisions.add(pair["decision"])
+            if learned and (covered or learned["decision"] == "UNCERTAIN"):
+                decisions.add(learned["decision"])
+            if decisions == {"UNSAFE"}:
+                reject("learned_unsafe" if covered else "rejected_pair")
+                continue
+            if decisions == {"SAFE"}:
+                return (
+                    result,
+                    "learned_metadata" if covered else "approved_pair",
+                )
             request = {
                 "instruction": INSTRUCTION,
                 "verification_kind": "input_pair",
@@ -387,17 +428,15 @@ def lookup(
                 continue
             attempted = True
             verdict = review(verifier, request, config.verifier_timeout)
-            valid = (
-                isinstance(verdict, dict)
-                and type(verdict.get("safe_to_reuse")) is bool
-                and isinstance(verdict.get("reason"), str)
-                and isinstance(verdict.get("segments"), list)
-                and all(type(i) is int for i in verdict["segments"])
-                and verdict["segments"] == list(range(len(segments)))
-            )
-            if valid and verdict["safe_to_reuse"]:
+            outcome = decision(verdict, len(segments))
+            if outcome in ("SAFE", "UNSAFE"):
                 expires = created + config.refresh_force
-                store.review(pair_key, {"approved": True}, expires)
+                store.review(
+                    pair_key,
+                    {"decision": outcome},
+                    expires,
+                    resolve_conflicts=True,
+                )
                 suggestions = verdict.get("patterns", [])
                 if (
                     isinstance(suggestions, list)
@@ -415,12 +454,22 @@ def lookup(
                     )
                 ):
                     store.review(
-                        rule_key, [p["pattern"] for p in suggestions], expires
+                        rule_key,
+                        {
+                            "decision": outcome,
+                            "patterns": [p["pattern"] for p in suggestions],
+                        },
+                        expires,
+                        resolve_conflicts=True,
                     )
-                return result, "verified_pair"
-            reason = verdict["reason"][:240] if valid else "invalid verdict"
+                if outcome == "SAFE":
+                    return result, "verified_pair"
+            reason = verdict["reason"][:240] if outcome else "invalid verdict"
+            code = "verifier_rejected" if outcome else "invalid_verdict"
+            if outcome == "UNCERTAIN" and "decision" in verdict:
+                code = "verifier_uncertain"
             reject(
-                "verifier_rejected" if valid else "invalid_verdict",
+                code,
                 verifier_reason=reason
                 if config.diagnostic_text
                 else redact(reason),

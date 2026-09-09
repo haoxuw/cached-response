@@ -105,7 +105,8 @@ reasons explain why other entries were missed: `verification_disabled`,
 `validator_rejected`, `validator_error`, `metadata_reference_present`,
 `undeclared_or_meaningful_change`, `pair_provider_state_changed`,
 `pair_type_changed`, `pair_fields_changed`, `pair_sequence_changed`,
-`verifier_rejected`, `invalid_verdict`, `verifier_error`,
+`verifier_rejected`, `verifier_uncertain`, `rejected_pair`, `learned_unsafe`,
+`invalid_verdict`, `verifier_error`,
 `verifier_input_too_large`, `refresh`, or decoding/rebinding failures.
 Pair guards include a redacted field path where available. Masking a free-text
 verifier explanation retains the machine-readable rejection reason.
@@ -241,26 +242,41 @@ An optional synchronous `verifier_overrider(evidence)` receives:
 It also receives the configured verifier model/options. Return:
 
 ```json
-{"safe_to_reuse": true, "reason": "Only a diagnostic label changed", "segments": [0], "patterns": []}
+{"decision": "SAFE", "reason": "Only a diagnostic label changed", "segments": [0], "patterns": []}
 ```
 
 `segments` must enumerate all segment indexes in order, exactly once. Only a
-boolean approval and string reason are accepted. Invalid, rejected or timed-out
-reviews fall back to the original function. The verifier cannot override guards.
+`SAFE`, `UNSAFE` or `UNCERTAIN` decision and a string reason are accepted. `SAFE`
+approves the pair; `UNSAFE` rejects it and remembers that rejection. `UNCERTAIN`
+runs the original function without saving a decision. Invalid or timed-out reviews
+also fall back. The verifier cannot override guards.
+
+Existing callbacks using `safe_to_reuse: true` still approve. A legacy `false`
+means uncertain, since it does not distinguish a known mismatch from doubt.
+Contradictory boolean and three-way decisions are invalid.
 
 Optional suggestions use `patterns=[{"segment": 0, "pattern": "..."}]`.
-Accepted expressions have exactly one allowlisted character class and a fixed or ranged
-length, for example `\A[A-Za-z0-9_-]{1,64}\Z` (escape backslashes in JSON).
+Accepted expressions have one allowlisted character class and a fixed or ranged
+length from 1 to 128, optionally preceded by up to 32 literal letters, digits,
+underscores or dashes. Examples: `\A[A-Za-z0-9_-]{1,64}\Z` and
+`\Atrace_[a-z]{1,32}\Z` (escape backslashes in JSON).
 Both old and new values must match. Arbitrary alternation, groups, repetition,
 lookarounds, unbounded lengths and unknown classes are rejected. A full suggestion
-set is required to learn; invalid suggestions do not invalidate a concrete approval.
+set is required to learn. Suggestions inherit the judge's `SAFE` or `UNSAFE`
+decision. Invalid suggestions do not invalidate a concrete decision. Never propose
+a decisive rule from uncertainty or from an identifier's format alone.
 
-SQLite persists exact approvals and learned patterns, bound to caller, original
+SQLite persists pair decisions and learned patterns, bound to caller, original
 entry, response, untouched context, declared paths, verifier model/options and
 `verifier_version`. Change that version when a callback or its policy changes.
 Learned patterns never apply to undeclared fields. Every reuse still checks the
-full guard, references, validator and original response age. Approvals and rules
-expire with that response; storage retains at most 4,096 review records.
+full guard, references, validator and original response age. An `UNSAFE` decision
+skips only its candidate. Uncovered changes ask the judge. Opposite decisions saved
+under one key atomically become `UNCERTAIN`; that key cannot regain a decisive
+fast path before expiry or a policy change. Pair/rule disagreements also ask the
+judge. No judge reason or raw segment values are saved in these review records.
+Decisions expire with that response; storage retains at most 4,096 review records.
+The three-way review format relearns earlier approvals; source responses stay usable.
 
 `verifier_timeout="10s"` bounds waiting for built-in and custom reviewers.
 Async provider calls are cancelled on deadline. Python cannot kill a synchronous

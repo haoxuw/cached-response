@@ -16,6 +16,8 @@ PREFIXED_HEX = re.compile(r"\b([A-Za-z][A-Za-z0-9]*[_-])([0-9a-fA-F]{8,})\b")
 PROTECTED = {
     "thought_signature",
     "thoughtSignature",
+    "thought_signatures",
+    "thoughtSignatures",
     "signature",
     "provider_specific_fields",
     "extra_content",
@@ -23,6 +25,8 @@ PROTECTED = {
     "reasoning_content",
     "reasoning",
     "redacted_thinking",
+    "thinking",
+    "thinking_blocks",
 }
 MIN_SYMBOL_FRACTION = 0.30
 URL = re.compile(r"https?://[^\s\"<>]+")

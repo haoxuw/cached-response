@@ -40,6 +40,36 @@ provider state and output references still have to pass the guards. The rule
 avoids a review call, including for large prompts. Changing an `owner_id` or an
 expiry is not safe merely because it has the same format.
 
+## Learn SAFE and UNSAFE decisions
+
+For declared metadata, the judge can return a decision and a bounded regex:
+
+| Decision | Next matching pair |
+| --- | --- |
+| `SAFE` | Reuse this candidate after the full input checks. |
+| `UNSAFE` | Skip this candidate without another judge call. |
+| `UNCERTAIN` | Save no decision; ask again next time. |
+
+For example, `trace_old` → `trace_new` may teach
+`\Atrace_[a-z]{1,32}\Z` when that field is only a debugging label. A later
+`trace_third` can use the same rule. A changed owner or instruction still misses.
+If a declared field actually affects the answer, an `UNSAFE` rule can avoid
+repeated review costs. It rejects only that candidate, not every cached answer.
+
+The pattern must cover every changed segment. Rules apply only to the same
+caller, source response, unchanged surrounding input, paths and policy. They
+expire with the response. Conflicting saved decisions ask the judge again.
+An uncertain or invalid judge response never teaches a rule.
+
+Try `python examples/minimal/input_pair.py` from the repository. Its local fixture
+judge teaches a rule: three requests make one upstream call and one review.
+
+Inspect `cache_misses()` in the serving process for `learned_unsafe`,
+`rejected_pair` or `verifier_uncertain`. `cache_stats()` reports hit reasons such
+as `learned_metadata`. Decisions live in the configured SQLite database's
+`reviews` table. They store decisions and patterns, not the judge's explanation.
+See the [callback format](reference.md#verification) for details.
+
 ## Let an agent investigate
 
 Read the skill shipped in the installed package:

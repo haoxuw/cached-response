@@ -34,6 +34,11 @@ Run `python examples/minimal/metadata_rules.py` to try caller-reviewed rules.
 Two changed trace labels reuse the answer; a changed resource status misses.
 It prints four results and reports two upstream calls, with no network access.
 
+Run `python examples/minimal/input_pair.py` to learn a SAFE regex from a local
+fixture judge. Three requests make one upstream call and one review; the third
+request hits `learned_metadata`. No credentials or model calls are needed.
+
+
 
 `signature_counts.py` exercises persistent masked and NLTK signature counters.
 Install `.[signatures]`, run `python -m nltk.downloader words` once, then

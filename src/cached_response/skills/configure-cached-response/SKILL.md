@@ -85,6 +85,13 @@ capture, edit config, or override protected fields. Inspect suggestions before
 promoting them into caller-reviewed rules. Do not broaden rules to defeat
 `verifier_input_too_large`; the reviewer needs full context.
 
+Learned decisions are `SAFE`, `UNSAFE`, or `UNCERTAIN`. A bounded pattern can
+reuse or reject the same candidate under unchanged context; an uncovered pattern
+or conflicting decisions fall through to the judge. Uncertain verdicts save no
+rule. Inspect `learned_unsafe`, `rejected_pair` and `verifier_uncertain` miss reasons.
+Do not turn a model's suggested swap into a system-text or thought-signature rule:
+automatic learning only supports declared metadata.
+
 ## Prove the improvement
 
 Test a valid metadata-only change and changes that must miss: a fact, resource ID,
