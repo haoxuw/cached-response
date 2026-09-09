@@ -62,7 +62,10 @@ class Config:
     max_entry_bytes: int = 16 * 1024 * 1024
     lease_seconds: float = 300
     wait_seconds: float = 300
-    report: bool = True
+    report: bool = False
+    diagnostics: bool = True
+    diagnostic_text: bool = False
+    near_miss_threshold: float = 0.90
     rules: tuple[Rule, ...] = ()
     validator: Callable | None = field(default=None, compare=False, repr=False)
     learning: bool = True
@@ -73,6 +76,8 @@ class Config:
     learning_recheck: float = 0
 
     def __post_init__(self):
+        if not 0 <= self.near_miss_threshold <= 1:
+            raise ValueError("near_miss_threshold must be between 0 and 1")
         for name in (
             "refresh_start",
             "refresh_force",

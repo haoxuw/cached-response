@@ -10,7 +10,7 @@ python examples/minimal/llm.py
 
 Each example adds just an import and a decorator to a function. On the first run,
 the function executes once and the second call uses its cached result. Both calls
-print their result; cache statistics go to stderr. Later runs may use both cached
+print their result; package logging and reports stay silent by default. Later runs may use both cached
 results because the local database persists.
 
 - `exact.py` uses `cached_staticmethod` for an ordinary pure function. Despite the
@@ -23,3 +23,9 @@ results because the local database persists.
 `cached_staticmethod` is enabled without a mode. The LLM example explicitly
 selects testing mode; LLM caching is disabled by default. See the [learning hook tutorial](../../README.md#learning-and-optional-override)
 for connecting your own judge model.
+
+Run `python examples/minimal/miss_diagnostics.py` for a fresh, isolated run that
+explicitly prints statistics and a masked near-miss example. It uses a local
+stand-in and a rejecting verifier, with no API calls. Inspect `cache_stats()` and
+`cache_misses()` inside your application process for its own results. File logging
+is optional through `configure_logging(path="cache_diagnostics.log")`.

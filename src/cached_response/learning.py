@@ -12,7 +12,9 @@ import random
 import re
 import time
 
+from . import adapters
 from .config import refresh_probability
+from .diagnostics import binding_summary, redact
 from .normalize import MARKER, PROTECTED, digest, dumps, normalize, rebind
 
 LOGGER = logging.getLogger("cached_response.learning")
@@ -386,7 +388,15 @@ def small_changes(before, after, differences):
     return True
 
 
-def approve(verifier, new_input, result, changes):
+def approve(
+    verifier,
+    new_input,
+    result,
+    changes,
+    diagnostic=None,
+    key="",
+    include_text=False,
+):
     request = {
         "instruction": INSTRUCTION,
         "new_input": new_input,
@@ -394,6 +404,13 @@ def approve(verifier, new_input, result, changes):
         "proposed_changes": changes,
     }
     if len(dumps(request)) > MAX_JUDGE_CHARS:
+        if diagnostic is not None:
+            diagnostic.reject(
+                key,
+                "verifier_input_too_large",
+                chars=len(dumps(request)),
+                limit=MAX_JUDGE_CHARS,
+            )
         return False
     verdict = verifier(request)
     accepted = (
@@ -401,12 +418,24 @@ def approve(verifier, new_input, result, changes):
         and verdict.get("safe_to_reuse") is True
         and isinstance(verdict.get("reason"), str)
     )
+    valid = (
+        isinstance(verdict, dict)
+        and isinstance(verdict.get("safe_to_reuse"), bool)
+        and isinstance(verdict.get("reason"), str)
+    )
+    reason = verdict["reason"][:240] if valid else "invalid verdict"
+    if valid and not include_text:
+        reason = redact(reason)
+    if diagnostic is not None and not accepted:
+        diagnostic.reject(
+            key,
+            "verifier_rejected" if valid else "invalid_verdict",
+            verifier_reason=reason,
+        )
     LOGGER.info(
         "Verification accepted=%s reason=%s",
         accepted,
-        verdict.get("reason", "invalid verdict")
-        if isinstance(verdict, dict)
-        else "invalid verdict",
+        reason,
     )
     return accepted
 
@@ -450,25 +479,37 @@ def references_changed(result, differences):
     return False
 
 
-def lookup(store, scope, body, normalized, config, verifier):
+def lookup(store, scope, body, normalized, config, verifier, diagnostic=None):
     """Return a rebound cached result only after an exact guarded rule match."""
     current, current_bindings = reference_view(normalized)
     if MASK in dumps(current):
         return None
     attempted = False
     for key, created, payload in store.candidates(scope, MAX_CANDIDATES):
+
+        def reject(reason, **details):
+            if diagnostic is not None:
+                diagnostic.reject(key, reason, **details)
+
+        if diagnostic is not None:
+            diagnostic.observe(key, created, payload)
         probability = refresh_probability(
             time.time() - created, config.refresh_start, config.refresh_force
         )
         if probability >= 1 or random.random() < probability:
+            reject("refresh", refresh_probability=probability)
             continue
+        stage = "normalization_failed"
         try:
             # Learned risky regex state is not reconstructed by this prototype.
             old_normalized = normalize(
                 payload["input"], config.mode, config.rules
             )
             old, old_bindings = reference_view(old_normalized)
+            stage = "rebind_failed"
             result = rebind(payload["result"], old_bindings, current_bindings)
+            stage = "decode_failed"
+            adapters.unpack(result)
             rule_key = digest(
                 {
                     "candidate": key,
@@ -476,50 +517,93 @@ def lookup(store, scope, body, normalized, config, verifier):
                     "response": payload["result"],
                 }
             )
+            stage = "validator_error"
             if config.validator and not config.validator(
                 payload["input"], body
             ):
+                reject("validator_rejected")
                 continue
+            stage = "verified_rule_unavailable"
             for rule in store.verified(rule_key):
                 try:
                     if (
                         digest(masked(current, rule["changes"]))
                         != rule["guard"]
                     ):
+                        reject("rule_guard_mismatch")
                         continue
                     differences = changed_values(old, current, rule["changes"])
                     if references_changed(result, differences):
+                        reject("output_references_changed_value")
                         continue
                     if random.random() < config.learning_recheck:
                         attempted = True
-                        if not approve(verifier, body, result, differences):
+                        stage = "verifier_error"
+                        if not approve(
+                            verifier,
+                            body,
+                            result,
+                            differences,
+                            diagnostic,
+                            key,
+                            config.diagnostic_text,
+                        ):
                             store.revoke(rule_key, rule)
                             return None
                     LOGGER.info("Learned rule hit candidate=%s", key)
                     return result
-                except (ValueError, KeyError, IndexError, TypeError):
+                except (ValueError, KeyError, IndexError, TypeError) as exc:
+                    if attempted:
+                        reject("verifier_error", error=type(exc).__name__)
+                        return None
+                    reject("rule_shape_mismatch")
                     continue
-            changes = propose(old, current)
-            if not changes:
+            stage = "proposal_rejected"
+            try:
+                changes = propose(old, current)
+            except ValueError as exc:
+                # propose() emits fixed explanations, never input values.
+                reject("proposal_rejected", detail=str(exc))
                 continue
+            if not changes:
+                reject("no_learnable_changes")
+                continue
+            stage = "mask_failed"
             before_masked, after_masked = (
                 masked(old, changes),
                 masked(current, changes),
             )
             if before_masked != after_masked:
+                reject("unmasked_content_changed")
                 continue
             rule = {"changes": changes, "guard": digest(before_masked)}
             differences = changed_values(old, current, changes)
             if distinct_changes(differences) > MAX_CHANGES:
+                reject(
+                    "too_many_changes",
+                    count=distinct_changes(differences),
+                    limit=MAX_CHANGES,
+                )
                 continue
             # A long system prompt cannot hide a large change to a short user
             # instruction. Only aligned changed spans contribute to this count.
             if not small_changes(old, current, differences):
+                reject("change_fraction_too_large", limit=MAX_FRACTION)
                 continue
             if references_changed(result, differences):
+                reject("output_references_changed_value")
                 continue
             attempted = True
-            if approve(verifier, body, result, differences):
+            stage = "verifier_error"
+            if approve(
+                verifier,
+                body,
+                result,
+                differences,
+                diagnostic,
+                key,
+                config.diagnostic_text,
+            ):
                 store.approve(rule_key, rule)
                 LOGGER.info(
                     "Learned rule approved candidate=%s changes=%s",
@@ -528,9 +612,17 @@ def lookup(store, scope, body, normalized, config, verifier):
                 )
                 return result
             return None  # At most one verifier call per incoming request.
-        except Exception:
+        except Exception as exc:
+            details = (
+                binding_summary(old_bindings, current_bindings)
+                if stage == "rebind_failed"
+                else {}
+            )
+            reject(stage, error=type(exc).__name__, **details)
             LOGGER.debug(
-                "Learning candidate rejected or unavailable", exc_info=True
+                "Learning candidate rejected stage=%s error=%s",
+                stage,
+                type(exc).__name__,
             )
             if attempted:
                 return None

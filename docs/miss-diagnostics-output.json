@@ -1,0 +1,77 @@
+{
+  "stats": {
+    "requests": 3,
+    "hit": 1,
+    "miss": 2,
+    "cache_miss_percent": 66.66666666666667,
+    "near_misses": 1,
+    "miss_reasons": {
+      "cold": 2
+    },
+    "candidate_rejections": {
+      "verifier_rejected": 1
+    },
+    "miss_prompt": {
+      "count": 2,
+      "chars": {
+        "total": 1680,
+        "min": 840,
+        "max": 840,
+        "mean": 840.0
+      },
+      "bytes": {
+        "total": 1680,
+        "min": 840,
+        "max": 840,
+        "mean": 840.0
+      },
+      "words": {
+        "total": 256,
+        "min": 128,
+        "max": 128,
+        "mean": 128.0
+      },
+      "symbols": {
+        "total": 42,
+        "min": 21,
+        "max": 21,
+        "mean": 21.0
+      },
+      "digits": {
+        "total": 12,
+        "min": 6,
+        "max": 6,
+        "mean": 6.0
+      },
+      "lines": {
+        "total": 6,
+        "min": 3,
+        "max": 3,
+        "mean": 3.0
+      }
+    }
+  },
+  "miss_example": {
+    "reason": "cold",
+    "candidate_key": "f6e7238c02a70d84259e7aa28e4933f7e92298bfa00fd7d8b4131b8b8947fb3a",
+    "signature_similarity": 0.9968,
+    "high_similarity": true,
+    "candidate_reason": "verifier_rejected",
+    "differences": [
+      {
+        "path": [
+          "messages",
+          0,
+          "content"
+        ],
+        "kind": "changed",
+        "before_chars": 807,
+        "after_chars": 807,
+        "before": "vers***** *******: ********* **, *026\n",
+        "after": "vers***** *******: ********* **, *026\n",
+        "offset": 769,
+        "redacted": true
+      }
+    ]
+  }
+}
