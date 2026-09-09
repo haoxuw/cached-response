@@ -101,12 +101,12 @@ def test_verifier_miss_example_stats_and_file_are_redacted(tmp_path, capsys):
     def verify(evidence):
         judges.append(evidence)
         return {
-            "safe_to_reuse": False,
+            "safe_to_reuse": False, "segments": [0],
             "reason": "alice@example.com needs live state",
         }
 
     @cached_llm_response(
-        mode="testing", path=tmp_path / "cache.db", verifier_overrider=verify
+        metadata_paths=("messages.*.content",), mode="testing", path=tmp_path / "cache.db", verifier_overrider=verify
     )
     def ask(body):
         calls.append(body)
@@ -154,9 +154,9 @@ def test_verifier_miss_example_stats_and_file_are_redacted(tmp_path, capsys):
         ("validator_error", "validator_error"),
         ("verifier_error", "verifier_error"),
         ("invalid", "invalid_verdict"),
-        ("references", "unmapped_output_reference"),
-        ("proportion", "pair_instruction_or_control_changed"),
-        ("structure", "pair_instruction_or_control_changed"),
+        ("references", "metadata_reference_present"),
+        ("proportion", "undeclared_or_meaningful_change"),
+        ("structure", "undeclared_or_meaningful_change"),
         ("refresh", "refresh"),
     ],
 )
@@ -164,7 +164,7 @@ def test_candidate_rejection_reasons(tmp_path, case, expected):
     def fail(*args):
         raise ValueError("secret@example.com")
 
-    options = {"mode": "testing", "path": tmp_path / "cache.db"}
+    options = {"mode": "testing", "path": tmp_path / "cache.db", "metadata_paths": ("messages.*.content",)}
     options["verifier_overrider"] = (
         fail if case == "verifier_error" else lambda _: {}
     )
@@ -179,7 +179,7 @@ def test_candidate_rejection_reasons(tmp_path, case, expected):
 
     before, after = request("07"), request("08")
     if case == "references":
-        before["messages"][-1]["content"] += " job_ab12cd34"
+        before["messages"][-1]["content"] = "job_ab12cd34"
     if case == "proportion":
         before, after = (
             request("07", user="1"),
@@ -207,7 +207,7 @@ def test_similarity_does_not_enable_reuse_and_respects_scope(tmp_path):
         calls.append(body)
         return "fresh"
 
-    options = {"mode": "conservative", "path": tmp_path / "cache.db"}
+    options = {"mode": "conservative", "path": tmp_path / "cache.db", "metadata_paths": ("messages.*.content",)}
     ask = cached_llm_response(**options)(upstream)
     ask(request("07"))
     ask(request("08"))
@@ -257,7 +257,7 @@ def test_rebinding_miss_explains_changed_identifier_relationships(tmp_path):
     ask(old)
     ask(new)
     check = cache_misses(1)[0]["candidates"][0]["checks"][0]
-    assert check['reason'] == 'pair_instruction_or_control_changed'
+    assert check['reason'] == 'undeclared_or_meaningful_change'
     assert check['path'] == ['messages', 1, 'content']
 
 

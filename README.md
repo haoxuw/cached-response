@@ -27,56 +27,63 @@ by default.
 | Mode | What it does |
 | --- | --- |
 | `disabled` (default) | Always calls your function. Keep this in production. |
-| `conservative` | Matches some changing UUIDs, timestamps, and generated IDs. |
-| `testing` | Matches more ID formats and supports individual pair review. |
-| `risky` | Compatibility mode with the same matching behavior as `testing`. |
+| `conservative` | Exact input matches only. |
+| `testing` | Exact matches, plus guarded review of declared metadata changes. |
+| `risky` | Same safeguards as `testing`; retained for compatibility. |
 
 ### Matching in three rules
 
-1. Recognize IDs and timestamps, replacing them with placeholders while preserving repeated references.
-2. Reuse matching inputs after checking caller, settings, cache age, and consistent replacements.
-3. Otherwise, check a nearby candidate and ask a verifier; without approval, run the original function.
+1. Reuse exact inputs only within the same caller, settings, policy, and freshness window.
+2. Find similar candidates, but reject every change outside explicitly declared irrelevant metadata.
+3. Review remaining changes with a fast model; save exact approvals and tightly scoped metadata patterns.
 
-The code uses regex patterns to recognize UUIDs, ISO timestamps, and some generated
-IDs. Repeated IDs share a placeholder: `A, A` becomes `ID1, ID1`, while `A, B`
-becomes `ID1, ID2`. It hashes this normalized request to look up a saved answer,
-keeping model settings and tool definitions unchanged. On a hit, it replaces old
-IDs and timestamps in the answer with the new values.
+Responses use exact input keys. Regexes recognize UUIDs, timestamps, and generated
+IDs for candidate search only. Optional masked and NLTK word signatures find more
+candidates; neither similarity nor a random-looking ID permits a hit.
 
-**Normalized matches skip the verifier.** This is a shortcut for tests, not proof
-that reuse is safe. For example, changing a certificate's expiry date can wrongly
-reuse an answer saying it has expired.
-
-After a normalized miss, testing mode checks nearby candidates. Instructions must
-still match after ID mapping; unclear mappings and changed protected provider
-data cause a miss. A verifier then sees both complete inputs and the proposed
-answer. It must approve each reuse; approvals are never saved as general rules.
-The verifier uses your existing model function or HTTP handler.
-`learning=False` disables this review path.
-
-`structural_matching=True` also considers differing histories and extra ID
-occurrences within the same caller and settings. It uses the same checks and
-verifier. Full histories remain visible; uncertain mappings are rejected.
-Run `python examples/minimal/structural_pairs.py` for a local demonstration.
-
-`signature_matching=True` retrieves candidates by masked and English-word
-signatures. Install `cached-response[signatures]` and run
-`python -m nltk.downloader words` first. Signatures never authorize reuse.
-`cache_signatures(path="cache.db")` shows persistent request/hit/miss counters.
-
-To use a different verifier:
+For broader matching, declare specific string fields whose values cannot change
+the answer or action. Only tool content and top-level `metadata` are eligible.
+Instructions, resource targets, facts, types, message order and provider state
+stay exact. Changed metadata referenced elsewhere or in the response causes a miss.
+The package never substitutes resource IDs in an old answer.
 
 ```python
-@cached_llm_response(mode="testing", verifier_overrider=my_verifier)
+@cached_llm_response(
+    mode="testing",
+    metadata_paths=("messages.*.content.diagnostic_trace",),
+    verifier_model="your-fast-model",     # A model your existing connection supports
+    verifier_options={"reasoning_effort": "none"},  # Provider-specific; optional
+    verifier_timeout="10s",
+    verifier_version="1",
+)
+def ask_llm(request):
+    return your_model_call(request)
 ```
 
-The callback receives full old/new inputs, original/rebound responses, and default
-instructions. Return `{"safe_to_reuse": True, "reason": "..."}` to approve this
-pair. Large built-in requests share identical top-level settings once, including
-tool schemas. No input is truncated; no general-purpose encoding is involved.
+The verifier sees numbered changed fields, both full inputs, and the cached
+response. It must review every change. Saved approvals cover the exact pair,
+response and policy; they expire with the original response. Optional learned
+regexes cover only declared metadata under identical surrounding context.
+Generated regexes are restricted to bounded character classes, never arbitrary
+expressions. `learning=False` disables this path. `metadata_paths=()` is the
+default, so changed inputs miss unless you explicitly declare metadata.
 
-Model approval can be wrong and consumes inference. Measure correctness and
-total model work as well as cache hits. See the [reference](docs/reference.md).
+The built-in verifier uses your original connection with a separate model when
+configured. It removes inherited thinking settings and tools. Configure reasoning
+options for your provider; absence of a thinking setting does not guarantee zero
+reasoning. A synchronous `verifier_overrider` can replace the model call.
+See the [callback contract and system prompt](docs/reference.md#verification).
+
+Try `python examples/minimal/input_pair.py` locally without credentials.
+Use `signature_matching=True` after installing `cached-response[signatures]` and
+running `python -m nltk.downloader words`. `cache_signatures(path="cache.db")`
+shows persistent request/hit/miss counters.
+
+**Defaults changed:** normalized keys no longer authorize reuse. Existing cache
+entries start cold. `structural_matching=True` broadens retrieval only; changed
+histories still miss. This intentionally removes unsafe hits. Model review can
+still be wrong if metadata is declared incorrectly; measure correctness and total
+inference time, including verifier overhead.
 
 ## cached_staticmethod
 
@@ -121,6 +128,10 @@ Set options directly on either decorator:
 | `version="2"` | Stop reusing old results when a hidden dependency changes. |
 | `min_words=100` | Minimum input length for the LLM decorator only. |
 | `learning=False` | Turn off model verification for the LLM decorator. |
+| `metadata_paths=()` | Exact dotted string paths or wildcards declaring irrelevant metadata. |
+| `verifier_version="1"` | Change this when your verifier policy or callback changes. |
+| `verifier_model=None` | Separate review model; `None` uses the original model. |
+| `verifier_timeout="10s"` | Maximum time spent waiting for each review. |
 | `verifier_overrider=...` | Replace the built-in LLM verification function. |
 
 Between days 1 and 7, the chance of refresh grows evenly: at day 4 it is 50%.

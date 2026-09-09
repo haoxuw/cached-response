@@ -29,9 +29,11 @@ with TemporaryDirectory(prefix="cached-response-demo-") as directory:
 
     @cached_llm_response(
         mode="testing",
+        metadata_paths=("messages.*.content",),
         path=Path(directory) / "cache.db",
         verifier_overrider=lambda _: {
             "safe_to_reuse": False,
+            "segments": [0],
             "reason": "alice@example.com's task needs current state",
         },
     )

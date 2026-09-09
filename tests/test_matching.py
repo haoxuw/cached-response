@@ -1,4 +1,4 @@
-"""Pair-only verification, with no learned patterns or reusable approvals."""
+"""Explicit metadata review and persistent concrete approvals."""
 
 import copy
 import json
@@ -25,7 +25,7 @@ def request(day, user="Inspect debug-binding without changing it."):
     }
 
 
-def test_every_pair_needs_approval_across_decorator_instances(tmp_path):
+def test_approvals_persist_across_decorator_instances(tmp_path):
     calls, judges = [], []
 
     def upstream(body):
@@ -33,11 +33,12 @@ def test_every_pair_needs_approval_across_decorator_instances(tmp_path):
         return "inspect"
 
     options = dict(
+        metadata_paths=("messages.*.content",),
         mode="testing",
         path=tmp_path / "cache.db",
         verifier_overrider=lambda e: (
             judges.append(e)
-            or {"safe_to_reuse": True, "reason": "Test fixture"}
+            or {"safe_to_reuse": True, "segments": [0], "reason": "Test fixture"}
         ),
     )
     cached = cached_llm_response(**options)(upstream)
@@ -46,14 +47,14 @@ def test_every_pair_needs_approval_across_decorator_instances(tmp_path):
     recreated = cached_llm_response(**options)(upstream)
     recreated(request("09"))
     recreated(request("09"))
-    assert len(calls) == 1 and len(judges) == 3
+    assert len(calls) == 1 and len(judges) == 2
     assert all(e["old_input"] == request("07") for e in judges)
     recreated(request("10", user="Delete debug-binding."))
-    assert len(calls) == 2 and len(judges) == 3
+    assert len(calls) == 2 and len(judges) == 2
     with sqlite3.connect(tmp_path / "cache.db") as db:
         db.execute("UPDATE entries SET created=0")
     recreated(request("11"))
-    assert len(calls) == 3 and len(judges) == 3
+    assert len(calls) == 3 and len(judges) == 2
 
 
 @pytest.mark.parametrize("role", ["system", "developer", "user"])
@@ -61,12 +62,13 @@ def test_changing_instruction_dates_cannot_be_approved(tmp_path, role):
     calls, judges = [], []
 
     @cached_llm_response(
+        metadata_paths=("messages.*.content",),
         mode="testing",
         min_words=0,
         path=tmp_path / "cache.db",
         verifier_overrider=lambda e: (
             judges.append(e)
-            or {"safe_to_reuse": True, "reason": "must not override"}
+            or {"safe_to_reuse": True, "segments": [0], "reason": "must not override"}
         ),
     )
     def ask(body):
@@ -81,15 +83,16 @@ def test_changing_instruction_dates_cannot_be_approved(tmp_path, role):
     assert len(calls) == 2 and not judges
 
 
-def test_timestamp_alias_changes_keep_identifier_rebinding(tmp_path):
+def test_changed_targets_and_timestamps_are_not_rebound(tmp_path):
     calls, judges = [], []
 
     @cached_llm_response(
+        metadata_paths=("messages.*.content",),
         mode="testing",
         path=tmp_path / "cache.db",
         verifier_overrider=lambda e: (
             judges.append(e)
-            or {"safe_to_reuse": True, "reason": "Test fixture"}
+            or {"safe_to_reuse": True, "segments": [0], "reason": "Test fixture"}
         ),
     )
     def ask(body):
@@ -113,8 +116,8 @@ def test_timestamp_alias_changes_keep_identifier_rebinding(tmp_path):
         }
     )
     ask(a)
-    assert ask(b) == {"target": "job_ef56ab78"}
-    assert len(calls) == len(judges) == 1
+    assert ask(b) == {"target": "job_ab12cd34"}
+    assert len(calls) == 2 and not judges
 
 
 @pytest.mark.parametrize(

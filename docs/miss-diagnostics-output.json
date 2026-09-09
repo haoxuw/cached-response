@@ -53,7 +53,7 @@
   },
   "miss_example": {
     "reason": "cold",
-    "candidate_key": "0c68e1114370fa785269c701e066c3879d843d218eb94af37a731521d9aa9bf8",
+    "candidate_key": "5d9dd978781ac842b2781529dbfa5056e849a2e21e6804534d2452a36ea30baa",
     "signature_similarity": 0.9969,
     "high_similarity": true,
     "candidate_reason": "verifier_rejected",

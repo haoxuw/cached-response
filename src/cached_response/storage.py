@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS leases (key TEXT PRIMARY KEY, owner TEXT NOT NULL, ex
 CREATE TABLE IF NOT EXISTS candidates (scope TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(scope, key));
 CREATE TABLE IF NOT EXISTS signature_counts (scope TEXT NOT NULL, kind TEXT NOT NULL, signature TEXT NOT NULL, requests INTEGER NOT NULL, hits INTEGER NOT NULL, misses INTEGER NOT NULL, first_seen REAL NOT NULL, last_seen REAL NOT NULL, PRIMARY KEY(scope, kind, signature));
 CREATE TABLE IF NOT EXISTS signature_entries (scope TEXT NOT NULL, kind TEXT NOT NULL, signature TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(scope, kind, key));
+CREATE TABLE IF NOT EXISTS reviews (key TEXT PRIMARY KEY, expires REAL NOT NULL, payload TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS signature_lookup ON signature_entries(scope, kind, signature);
 """
 _stores_lock = threading.Lock()
@@ -107,6 +108,23 @@ class Store:
             (key, created, json.loads(payload))
             for key, created, payload in rows
         ]
+
+    def review(self, key, payload=None, expires=None):
+        """Bounded, expiring approvals/rules; never renew the source response age."""
+        with self.connect() as db:
+            db.execute("DELETE FROM reviews WHERE expires <= ?", (time.time(),))
+            if payload is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO reviews VALUES (?, ?, ?)",
+                    (key, expires, json.dumps(payload)),
+                )
+                db.execute(
+                    "DELETE FROM reviews WHERE key IN (SELECT key FROM reviews ORDER BY expires DESC, key LIMIT -1 OFFSET 4096)"
+                )
+            row = db.execute(
+                "SELECT payload FROM reviews WHERE key=?", (key,)
+            ).fetchone()
+        return json.loads(row[0]) if row else None
 
     def count_signatures(self, scope, signatures, hit):
         now = time.time()

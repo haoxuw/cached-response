@@ -26,12 +26,12 @@ from .diagnostics import (
     cache_misses,
     remember,
 )
-from .normalize import Normalized, digest, dumps, normalize, rebind, word_count
+from .normalize import Normalized, digest, dumps, normalize, word_count
 from .storage import get_store
 
 LOGGER = logging.getLogger("cached_response")
 POLL_INTERVAL = 0.05
-FORMAT_VERSION = 5
+FORMAT_VERSION = 6
 MARSHAL_VERSION = (
     2  # Avoid reference-sharing flags changing after introspection.
 )
@@ -53,6 +53,11 @@ def cache_stats() -> dict[str, Any]:
     )
     misses = result.get("miss", 0)
     result["cache_miss_percent"] = 100 * misses / requests if requests else 0.0
+    result["hit_reasons"] = {
+        key.removeprefix("hit_reason:"): result.pop(key)
+        for key in list(result)
+        if key.startswith("hit_reason:")
+    }
     result["miss_reasons"] = {
         key.removeprefix("miss_reason:"): result.pop(key)
         for key in list(result)
@@ -80,8 +85,7 @@ def decision(kind, reason, config, key="", diagnostic=None):
     with _stats_lock:
         _stats["requests"] += 1
         _stats[kind] += 1
-        if kind == "miss":
-            _stats[f"miss_reason:{reason}"] += 1
+        _stats[f"{kind}_reason:{reason}"] += 1
         if diagnostic is not None:
             _stats["diagnosed_misses"] += 1
             candidates = diagnostic.get("candidates", [])
@@ -265,7 +269,8 @@ def prepare(body, scope, config, llm, verifier=None):
             "mode": config.mode if llm else "exact",
             "rules": [asdict(rule) for rule in config.rules],
             "learning": bool(matching_scope),
-            "input": normalized.body,
+            "input": body,
+            "policy": matching.policy(config) if llm else None,
         }
     )
     owner, deadline = uuid.uuid4().hex, time.monotonic() + config.wait_seconds
@@ -291,12 +296,10 @@ def prepare(body, scope, config, llm, verifier=None):
                     ):
                         rejection_reason = "validator_rejected"
                         raise ValueError("Validator rejected the candidate")
-                    rejection_reason = "rebind_failed"
-                    result = rebind(
-                        payload["result"],
-                        payload["bindings"],
-                        normalized.bindings,
-                    )
+                    rejection_reason = "input_changed"
+                    if dumps(payload["input"]) != dumps(body):
+                        raise ValueError("Stored input differs from exact key")
+                    result = payload["result"]
                     # Check decoding before advertising a hit.
                     rejection_reason = "decode_failed"
                     adapters.unpack(result)
@@ -681,7 +684,7 @@ def cached_llm_response(
         version: Explicit cache version for changes to hidden dependencies.
         verifier_overrider: Optional replacement for built-in verification.
             Receives evidence including default instructions and returns a dict
-            with safe_to_reuse (bool) and reason (str), synchronously. By default,
+            with safe_to_reuse (bool), reason (str), and segments (all indexes), synchronously. By default,
             supported chat wrappers use the package prompt and original function.
         **options: Config fields such as path, min_words, refresh_start, and
             refresh_force; namespace additionally separates caches.

@@ -4,8 +4,7 @@ import json
 import pytest
 
 from cached_response import cache_misses, cached_llm_response
-from cached_response.matching import reference_view
-from cached_response.normalize import normalize
+from cached_response.config import Config
 from cached_response.matching import PairRejected, prepare
 from cached_response.storage import get_store
 
@@ -19,39 +18,36 @@ def request(target='job_ab12cd34', note='No trace.', **data):
 
 
 def prepared(before, after, result):
-    old, old_bindings = reference_view(normalize(before, 'testing'))
-    new, new_bindings = reference_view(normalize(after, 'testing'))
-    return prepare(old, new, old_bindings, new_bindings, result)
+    return prepare(before, after, result, Config(metadata_paths=('messages.*.content.note',)))
 
 
 @pytest.mark.parametrize('mode', ['testing', 'risky'])
 @pytest.mark.parametrize('diagnostics', [True, False])
-def test_extra_reference_requires_pair_approval_and_rebinds_response(tmp_path, mode, diagnostics):
+def test_declared_metadata_requires_approval_then_persists(tmp_path, mode, diagnostics):
     calls, judges = [], []
     def verifier(evidence):
         judges.append(evidence)
-        return {'safe_to_reuse': True, 'reason': 'The next action reads the requested resource.'}
+        return {'safe_to_reuse': True, 'segments': [0], 'reason': 'The next action reads the requested resource.'}
     @cached_llm_response(mode=mode, min_words=0, diagnostics=diagnostics,
-                         path=tmp_path / 'cache.db', verifier_overrider=verifier)
+                         path=tmp_path / 'cache.db', metadata_paths=('messages.*.content.note',), verifier_overrider=verifier)
     def ask(body):
         calls.append(body)
         return {'action': 'inspect', 'target': 'job_ab12cd34'}
     before = request()
-    after = request('job_ef56ab78', 'Trace trace_0123abcd was recorded.')
+    after = request(note='Trace trace_0123abcd was recorded.')
     ask(before)
-    assert ask(after) == {'action': 'inspect', 'target': 'job_ef56ab78'}
+    assert ask(after) == {'action': 'inspect', 'target': 'job_ab12cd34'}
     assert len(calls) == 1
     assert len(judges) == 1
     assert judges[0]['verification_kind'] == 'input_pair'
     assert judges[0]['old_input'] == before
     assert judges[0]['new_input'] == after
-    assert judges[0]['reference_alignment']['mapped_reference_count'] == 1
-    assert judges[0]['reference_alignment']['unmapped_current_reference_count'] == 1
+    assert judges[0]['segments'][0]['path'] == ['messages', 2, 'content', 'note']
     # This approval must not create a shape rule or silently cover another pair.
     with get_store(str(tmp_path / 'cache.db')).connect() as db:
         assert db.execute("SELECT count(*) FROM sqlite_master WHERE name='verified_rules'").fetchone()[0] == 0
     ask(after)
-    assert len(judges) == 2
+    assert len(judges) == 1
     assert len(calls) == 1
 
 
@@ -61,8 +57,8 @@ def test_extra_reference_requires_pair_approval_and_rebinds_response(tmp_path, m
 ])
 def test_pair_review_mode_gate(tmp_path, options):
     calls, judges = [], []
-    @cached_llm_response(min_words=0, path=tmp_path / 'cache.db',
-                         verifier_overrider=lambda e: judges.append(e) or {'safe_to_reuse': True, 'reason': 'yes'},
+    @cached_llm_response(min_words=0, path=tmp_path / 'cache.db', metadata_paths=('messages.*.content.note',),
+                         verifier_overrider=lambda e: judges.append(e) or {'safe_to_reuse': True, 'segments': [0], 'reason': 'yes'},
                          **options)
     def ask(body):
         calls.append(body)
@@ -76,7 +72,7 @@ def test_pair_review_mode_gate(tmp_path, options):
 @pytest.mark.parametrize('verdict', [False, 'true', None])
 def test_pair_rejection_or_invalid_verdict_runs_upstream(tmp_path, verdict):
     calls, judges = [], []
-    @cached_llm_response(mode='testing', min_words=0, path=tmp_path / 'cache.db',
+    @cached_llm_response(mode='testing', min_words=0, path=tmp_path / 'cache.db', metadata_paths=('messages.*.content.note',),
                          verifier_overrider=lambda e: judges.append(e) or {'safe_to_reuse': verdict, 'reason': 'no'})
     def ask(body):
         calls.append(body)
@@ -89,8 +85,8 @@ def test_pair_rejection_or_invalid_verdict_runs_upstream(tmp_path, verdict):
 
 def test_pair_can_review_changed_multiline_tool_text(tmp_path):
     calls, judges = [], []
-    @cached_llm_response(mode='testing', min_words=0, path=tmp_path / 'cache.db',
-                         verifier_overrider=lambda e: judges.append(e) or {'safe_to_reuse': True, 'reason': 'read current state'})
+    @cached_llm_response(mode='testing', min_words=0, path=tmp_path / 'cache.db', metadata_paths=('messages.*.content.note',),
+                         verifier_overrider=lambda e: judges.append(e) or {'safe_to_reuse': True, 'segments': [0], 'reason': 'read current state'})
     def ask(body):
         calls.append(body)
         return 'read current state'
@@ -101,11 +97,11 @@ def test_pair_can_review_changed_multiline_tool_text(tmp_path):
 
 
 @pytest.mark.parametrize('mutation,reason', [
-    ('instruction', 'pair_instruction_or_control_changed'),
+    ('instruction', 'undeclared_or_meaningful_change'),
     ('state', 'pair_provider_state_changed'),
     ('sequence', 'pair_sequence_changed'),
     ('fields', 'pair_fields_changed'),
-    ('roles', 'pair_instruction_or_control_changed'),
+    ('roles', 'undeclared_or_meaningful_change'),
 ])
 def test_hard_guards_cannot_be_overridden_by_verifier(mutation, reason):
     before = request(events=[{'status': 'ready'}, {'status': 'running'}])
@@ -130,14 +126,14 @@ def test_hard_guards_cannot_be_overridden_by_verifier(mutation, reason):
 
 
 def test_ambiguous_or_removed_output_reference_is_rejected():
-    before = request(note='Prior trace_0123abcd')
+    before = request(note='trace_0123abcd')
     after = request(note='No trace.')
-    with pytest.raises(PairRejected, match='unmapped_output_reference'):
+    with pytest.raises(PairRejected, match='metadata_reference_present'):
         prepared(before, after, {'target': 'trace_0123abcd'})
 
 
 def test_removed_reference_embedded_in_output_is_rejected():
-    with pytest.raises(PairRejected, match='unmapped_output_reference'):
+    with pytest.raises(PairRejected, match='metadata_reference_present'):
         prepared(request(note='trace_0123abcd'), request(note='No trace.'),
                  {'target': 'prefix_trace_0123abcd_suffix'})
 
@@ -153,13 +149,13 @@ def test_nested_equal_but_different_types_are_rejected():
 def test_relationship_splits_cannot_rebind_output():
     before = request(note='Related job_ab12cd34')
     after = request('job_ef56ab78', 'Related job_0123abcd')
-    with pytest.raises(PairRejected, match='unmapped_output_reference'):
+    with pytest.raises(PairRejected, match='undeclared_or_meaningful_change'):
         prepared(before, after, {'target': 'job_ab12cd34'})
 
 
 def test_changed_message_sequence_has_explicit_diagnostic(tmp_path):
     judges = []
-    @cached_llm_response(mode='testing', min_words=0, path=tmp_path / 'cache.db',
+    @cached_llm_response(mode='testing', min_words=0, path=tmp_path / 'cache.db', metadata_paths=('messages.*.content.note',),
                          verifier_overrider=lambda e: judges.append(e) or {})
     def ask(body):
         return 'inspect'
@@ -190,12 +186,12 @@ def test_builtin_pair_verifier_uses_existing_function(tmp_path, asynchronous, mo
     def model(body):
         if body.get('response_format') == {'type': 'json_object'}:
             judges.append(body)
-            return {'safe_to_reuse': True, 'reason': 'Test verdict'}
+            return {'safe_to_reuse': True, 'segments': [0], 'reason': 'Test verdict'}
         calls.append(body)
         return 'inspect current state'
     async def async_model(body):
         return model(body)
-    ask = cached_llm_response(mode=mode, min_words=0, path=tmp_path / 'cache.db')(
+    ask = cached_llm_response(mode=mode, min_words=0, path=tmp_path / 'cache.db', metadata_paths=('messages.*.content.note',))(
         async_model if asynchronous else model)
     before, after = request(), request(note='Trace trace_0123abcd')
     if asynchronous:
@@ -212,12 +208,12 @@ def test_builtin_pair_verifier_uses_existing_function(tmp_path, asynchronous, mo
     evidence = json.loads(judges[0]['messages'][1]['content'])
     assert evidence['old_input'] == before
     assert evidence['new_input'] == after
-    assert evidence['proposed_changes'] == []
+    assert len(evidence['segments']) == 1
 
 
 def test_validator_rejection_blocks_pair_review(tmp_path):
     calls, judges = [], []
-    @cached_llm_response(mode='testing', min_words=0, path=tmp_path / 'cache.db',
+    @cached_llm_response(mode='testing', min_words=0, path=tmp_path / 'cache.db', metadata_paths=('messages.*.content.note',),
                          validator=lambda old, new: False,
                          verifier_overrider=lambda e: judges.append(e))
     def ask(body):
@@ -235,7 +231,7 @@ def test_pair_review_is_bounded_and_does_not_log_exception_text(tmp_path, monkey
     def verifier(e):
         judges.append(e)
         raise RuntimeError('private-person@example.com')
-    @cached_llm_response(mode='testing', min_words=0, path=tmp_path / 'cache.db',
+    @cached_llm_response(mode='testing', min_words=0, path=tmp_path / 'cache.db', metadata_paths=('messages.*.content.note',),
                          verifier_overrider=verifier)
     def ask(body):
         calls.append(body)
@@ -262,7 +258,7 @@ def test_http_stream_pair_reuse_preserves_request_and_output_ids(tmp_path):
         body = await request.json()
         if body.get('response_format') == {'type': 'json_object'}:
             judges.append(body)
-            return {'safe_to_reuse': True, 'reason': 'Test verdict'}
+            return {'safe_to_reuse': True, 'segments': [0], 'reason': 'Test verdict'}
         calls.append(body)
         async def chunks():
             event = {'choices': [{'index': 0, 'delta': {'content': 'Inspect job_ab12cd34'}, 'finish_reason': 'stop'}]}
@@ -272,15 +268,14 @@ def test_http_stream_pair_reuse_preserves_request_and_output_ids(tmp_path):
 
     complete.__annotations__['request'] = Request
     app.post('/v1/chat/completions')(cached_llm_response(
-        mode='testing', min_words=0, path=tmp_path / 'cache.db')(complete))
-    before, after = request(), request('job_ef56ab78', 'Trace trace_0123abcd')
+        mode='testing', min_words=0, path=tmp_path / 'cache.db', metadata_paths=('messages.*.content.note',))(complete))
+    before, after = request(), request(note='Trace trace_0123abcd')
     before['stream'] = after['stream'] = True
     with TestClient(app) as client:
         assert client.post('/v1/chat/completions', json=before).status_code == 200
         response = client.post('/v1/chat/completions', json=after)
     assert response.status_code == 200
-    assert 'Inspect job_ef56ab78' in response.text
-    assert 'job_ab12cd34' not in response.text
+    assert 'Inspect job_ab12cd34' in response.text
     assert response.text.endswith('data: [DONE]\n\n')
     assert len(calls) == len(judges) == 1
     evidence = json.loads(judges[0]['messages'][1]['content'])

@@ -74,7 +74,11 @@ class Config:
     verifier_overrider: Callable | None = field(
         default=None, compare=False, repr=False
     )
-    verifier_timeout: float = 90
+    metadata_paths: tuple[str, ...] = ()
+    verifier_model: str | None = None
+    verifier_options: dict = field(default_factory=dict)
+    verifier_version: str = "1"
+    verifier_timeout: float = 10
 
     def __post_init__(self):
         if self.signature_matching and self.mode != "disabled":
@@ -105,6 +109,12 @@ class Config:
             <= 0
         ):
             raise ValueError("Size and timeout limits must be positive")
+        if any(not isinstance(p, str) or not p for p in self.metadata_paths):
+            raise ValueError(
+                "metadata_paths must contain nonempty dotted paths"
+            )
+        if not isinstance(self.verifier_options, dict):
+            raise ValueError("verifier_options must be a dictionary")
         if self.verifier_timeout <= 0:
             raise ValueError("Require verifier_timeout > 0")
 

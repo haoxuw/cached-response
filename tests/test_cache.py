@@ -89,7 +89,7 @@ def test_staticmethod_and_enum_input():
     assert Example.compute(int, Color.RED) == Example.compute(int, Color.RED)
 
 
-def test_uuid_references_are_rebound():
+def test_uuid_targets_require_fresh_response():
     calls = []
 
     @cached_llm_response(report=False)
@@ -100,8 +100,8 @@ def test_uuid_references_are_rebound():
 
     ask(body(UUID_A))
     result = ask(body(UUID_B))
-    assert result == {"text": f"Read {UUID_B}.", "arguments": json.dumps({"id": UUID_B}, separators=(",", ":"))}
-    assert len(calls) == 1
+    assert result == {"text": f"Read {UUID_B}.", "arguments": json.dumps({"id": UUID_B})}
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("mode", ["conservative", "testing", "risky"])
@@ -137,8 +137,8 @@ def test_testing_handles_execution_ids_and_metadata(monkeypatch):
     first = body('work kanban task t_1234abcd')
     second = body('work kanban task t_9876abef')
     ask(first)
-    assert "t_9876abef" in ask(second)["arguments"]
-    assert len(calls) == 1
+    assert "t_1234abcd" in ask(second)["arguments"]
+    assert len(calls) == 2
 
 
 def test_alias_relationship_is_preserved():

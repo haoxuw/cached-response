@@ -38,6 +38,6 @@ requests, one hit, and one miss. No model credentials are needed.
 
 `structural_pairs.py` compares structural matching off/on using a fixture
 verifier. It adds a history message and changes a repeated resource ID. The
-enabled case makes one upstream call and one verification, and rebinds the result
-to the new ID. Run `python examples/minimal/structural_pairs.py`; no credentials
+two cases both make two upstream calls and skip verification: changed targets
+and histories cannot be declared irrelevant. Run `python examples/minimal/structural_pairs.py`; no credentials
 or NLTK data are needed.

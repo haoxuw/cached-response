@@ -20,7 +20,7 @@ def test_default_prompt_reviews_each_pair(tmp_path, asynchronous, response_kind)
     def model(body):
         if body.get("response_format") == {"type": "json_object"}:
             judges.append(body)
-            verdict = {"safe_to_reuse": True, "reason": "Test verdict"}
+            verdict = {"safe_to_reuse": True, "segments": [0], "reason": "Test verdict"}
             if response_kind == "dict":
                 return verdict
             if response_kind == "text":
@@ -33,7 +33,7 @@ def test_default_prompt_reviews_each_pair(tmp_path, asynchronous, response_kind)
         return model(body)
 
     cached = cached_llm_response(
-        mode="testing", path=tmp_path / "cache.db", report=False
+        metadata_paths=("messages.*.content",), mode="testing", path=tmp_path / "cache.db", report=False
     )(async_model if asynchronous else model)
     if asynchronous:
 
@@ -66,7 +66,7 @@ def test_default_rejection_or_invalid_verdict_runs_model(tmp_path, verdict):
     calls, judges = [], []
 
     @cached_llm_response(
-        mode="testing", path=tmp_path / "cache.db", report=False
+        metadata_paths=("messages.*.content",), mode="testing", path=tmp_path / "cache.db", report=False
     )
     def model(body):
         if body.get("response_format") == {"type": "json_object"}:

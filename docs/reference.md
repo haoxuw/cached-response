@@ -1,30 +1,12 @@
 # Configuration and matching reference
 
-## Choose how much the LLM cache ignores
+## Matching contract
 
-```python
-@cached_llm_response(mode="testing")
-async def ask_llm(request):
-    return await existing_model_call(request)
-```
-
-| Mode | Differences eligible for matching |
-| --- | --- |
-| `disabled` (default) | No caching or normalization. |
-| `conservative` | UUIDs, ISO date-time strings, and long identifiers containing many symbols. |
-| `testing` | Also prefixed hexadecimal identifiers and recognized provider tool-call IDs. Can ask the existing model to approve a concrete input pair. |
-| `risky` | Same matching behavior as testing; retained for compatibility. |
-
-Numeric values stay exact during normalization. Changed tool data can reach
-pair review; numeric metadata names do not make those values irrelevant.
-Caller-supplied `Rule` objects explicitly authorize additional ID formats.
-`risky` remains accepted for compatibility and now behaves like `testing`.
-Automatic rare-token discovery and learned regex masks have been removed.
-
-Normalized equality is an approximation: an ID or timestamp can change the
-meaning of a request. Rebinding preserves identifier relationships, not semantic
-equivalence. Keep production caching disabled and validate replayed outcomes.
-See the [input relevance checklist](input-relevance.md) for the boundaries.
+Caching defaults to disabled. Conservative mode reuses exact inputs only.
+Testing/risky modes additionally review changes to caller-declared irrelevant
+metadata. All other changes miss, including UUIDs and dates that normalize alike.
+`Rule` regexes and masked/NLTK signatures only retrieve and rank candidates.
+They never authorize reuse. See the [input relevance checklist](input-relevance.md).
 
 ## Defaults
 
@@ -51,7 +33,8 @@ PATH` reports persistent entry count and size without displaying prompts.
 
 `cache_stats()` returns aggregate process-wide counts for both decorators:
 `requests`, `hit`, `miss`, `cache_hit_percent`, `cache_miss_percent`, and
-`miss_reasons`. Disabled calls and `use_cache=False` are excluded. A miss counts
+`miss_reasons` and `hit_reasons` (`exact`, `verified_pair`, `approved_pair`,
+`learned_metadata`). Disabled calls and `use_cache=False` are excluded. A miss counts
 the lookup decision, even if the subsequent upstream call fails.
 
 With `diagnostics=True` (default), LLM misses also contribute:
@@ -102,8 +85,8 @@ function, namespace, mode, rules, and HTTP identity. Chat requests also require
 matching model settings and tools. By default reuse requires matching message roles; when
 that group has no candidates, diagnostics can inspect nearby role sequences and
 report `message_role_sequence_changed` with both message counts. This observation
-does not authorize reuse. Opt-in `structural_matching` can instead align differing
-histories for pair review. Non-chat argument shapes use
+does not authorize reuse. `structural_matching` broadens retrieval across role
+sequences, but changed histories still fail the guard. Non-chat argument shapes use
 the function scope. This is a bounded investigation of nearby entries, not a
 full-database search; older entries without a candidate index may not appear.
 Candidates skipped by an early verifier rejection are not all evaluated.
@@ -117,10 +100,10 @@ instruction makes reuse unsafe. A `near_miss` is a candidate for investigation,
 not proof of a lost safe cache hit. Cache hashes themselves have no similarity
 interpretation, and opaque provider signatures are not treated as confidence.
 
-The request reason `cold` means its exact normalized key was absent. Candidate
+The request reason `cold` means its exact input key was absent. Candidate
 reasons explain why other entries were missed: `verification_disabled`,
-`validator_rejected`, `validator_error`, `unmapped_output_reference`,
-`pair_instruction_or_control_changed`, `pair_provider_state_changed`,
+`validator_rejected`, `validator_error`, `metadata_reference_present`,
+`undeclared_or_meaningful_change`, `pair_provider_state_changed`,
 `pair_type_changed`, `pair_fields_changed`, `pair_sequence_changed`,
 `verifier_rejected`, `invalid_verdict`, `verifier_error`,
 `verifier_input_too_large`, `refresh`, or decoding/rebinding failures.
@@ -207,64 +190,88 @@ configure(
 )
 ```
 
-Rules accept a name, regex, and dotted paths with `*` wildcards. They authorize
-normalization at those positions, so keep them narrow. An optional synchronous
+Rules accept a name, regex, and dotted paths with `*` wildcards. They influence
+candidate normalization only. Keep caller-authored regexes bounded and narrow. An optional synchronous
 `validator(old_input, new_input)` can reject a candidate; false or an exception
 causes a miss. It can call an LLM if the caller chooses, but that adds inference
 cost and cannot prove equivalence.
 
-Testing and risky modes use one candidate-review path after a normalized miss.
-The three rules are listed in the README. Ordinary lookups inspect eight recent
-entries; signatures can contribute up to eight entries per bucket, at most 24
-total. Candidates share caller identity, namespace, mode, explicit rules, model
-settings and tool schemas. Without `structural_matching`, message roles also
-remain part of the lookup scope.
+## Verification
 
-The default pair check preserves JSON types, fields, list lengths, instructions,
-non-content controls and opaque provider state. Tool/assistant content may
-change, but requires full model review. IDs map by their structured occurrences;
-mappings must be one-to-one. An unmapped old ID cannot survive in the response.
-Changed timestamps remain visible to the verifier, without renumbering IDs when
-two events previously happened to share a timestamp.
+Testing/risky mode compares up to eight recent candidates, plus eight per enabled
+signature bucket. One model review is allowed per lookup, including errors.
 
-For sync/async functions taking one chat-request dictionary, verification calls
-the original undecorated function. HTTP handlers likewise use their existing
-provider connection. The request disables tools and asks for JSON.
-`learning=False` disables verification; conservative and disabled modes never
-invoke it. At most one verifier is called per lookup, including failed reviews.
+Declare `metadata_paths=("messages.*.content.diagnostic_trace",)` only when the
+application contract says those values cannot affect the answer or action.
+Paths address string leaves in tool content (including JSON text), or top-level
+`metadata`. System/developer/user/assistant content and other request controls
+cannot be declared away. Unknown fields, field sets, list lengths and JSON types
+stay exact. Each changed value must be nonempty and at most 512 characters;
+there can be at most 16 changes. Repeated values, output references, and references
+in unchanged context reject reuse. Bytes/tuple response envelopes are not eligible
+for broader reuse. No identifier rebinding takes place.
 
-An optional synchronous `verifier_overrider(evidence)` replaces that call. It
-receives `instruction`, `verification_kind="input_pair"`, `old_input`, `new_input`,
-`original_cached_response`, `cached_response`, and ID-mapping counts in
-`reference_alignment`. The old `proposed_changes` field stays empty for callback
-compatibility. Return `{"safe_to_reuse": bool, "reason": str}`. Only boolean true
-with a string reason approves reuse. False, invalid output or an exception
-falls back upstream. Inputs and responses in the evidence remain untrusted data.
+`verifier_model` selects a separate model through the original function or HTTP
+connection. `verifier_options` supplies provider-specific parameters such as
+`reasoning_effort="none"`. Inherited thinking controls, tools and streaming options
+are removed; the request forces nonstreaming JSON, temperature zero and a 2,048
+token limit. If no model is configured, the original model remains the fallback.
+The application must make the selected model available through its connection.
 
-Approvals are never generalized or persisted. Even the same non-exact pair must
-be approved again. This trades fewer code paths and simpler safeguards for extra
-verifier calls compared with the removed learned-rule implementation. No hit
-renews the stored response's age. Change `version=` or `namespace=` when changing
-verifier policy or hidden dependencies.
+The default system prompt lives in
+[`matching.py`](../src/cached_response/matching.py). It explains the cache goal,
+requires full-context review of all numbered changes, treats input as untrusted,
+and rejects changed targets, facts, permissions, deadlines or references. Examples
+contrast a diagnostic trace change with a changed resource owner or expiry.
 
-Built-in async/HTTP verification uses `verifier_timeout="90s"`. Synchronous calls
-and custom overrides need timeouts in their own clients. The total verifier
-instruction and serialized evidence are limited to 300,000 characters.
-For large inputs, identical top-level fields (other than messages) appear once
-under `shared_input`; merge these into both inputs to reconstruct them. This
-keeps repeated tool schemas out of the wire payload without a recursive codec.
-Custom callbacks still receive the original complete dictionaries. Unique large
-histories can exceed the limit and fall back upstream.
+An optional synchronous `verifier_overrider(evidence)` receives:
+`instruction`, `verification_kind="input_pair"`, `old_input`, `new_input`,
+`cached_response`, and `segments` containing each change's `path`, `old` and `new`.
+It also receives the configured verifier model/options. Return:
 
-## Migration from the experimental implementation
+```json
+{"safe_to_reuse": true, "reason": "Only a diagnostic label changed", "segments": [0], "patterns": []}
+```
 
-`evidence.py`, `structural.py`, `pairwise.py`, and `learning.py` are replaced by
-one `matching.py` pipeline. Automatic regex learning, rare-token discovery,
-`learning_recheck`, and the CLI's `learned_rules` count are removed. Old rule
-tables in existing databases are ignored; they are not deleted automatically.
-The cache format/scope version changes, so existing entries start cold while
-old persisted signature counters remain inspectable. Imports, decorators,
-explicit `Rule` configuration, logging and counter APIs remain available.
+`segments` must enumerate all segment indexes in order, exactly once. Only a
+boolean approval and string reason are accepted. Invalid, rejected or timed-out
+reviews fall back to the original function. The verifier cannot override guards.
+
+Optional suggestions use `patterns=[{"segment": 0, "pattern": "..."}]`.
+Accepted expressions have exactly one allowlisted character class and a fixed or ranged
+length, for example `\A[A-Za-z0-9_-]{1,64}\Z` (escape backslashes in JSON).
+Both old and new values must match. Arbitrary alternation, groups, repetition,
+lookarounds, unbounded lengths and unknown classes are rejected. A full suggestion
+set is required to learn; invalid suggestions do not invalidate a concrete approval.
+
+SQLite persists exact approvals and learned patterns, bound to caller, original
+entry, response, untouched context, declared paths, verifier model/options and
+`verifier_version`. Change that version when a callback or its policy changes.
+Learned patterns never apply to undeclared fields. Every reuse still checks the
+full guard, references, validator and original response age. Approvals and rules
+expire with that response; storage retains at most 4,096 review records.
+
+`verifier_timeout="10s"` bounds waiting for built-in and custom reviewers.
+Async provider calls are cancelled on deadline. Python cannot kill a synchronous
+callback: at most four outstanding daemon workers can finish in the background,
+without writing late approvals. Set provider-side timeouts too. Saturated review
+capacity falls back immediately. Separate keys/processes can still duplicate reviews.
+
+The total instruction and serialized evidence are limited to 60,000 characters.
+Large shared top-level settings appear once under `shared_input`; merging these
+into each input reconstructs both requests. No input is truncated. Larger requests
+miss instead of receiving a review without sufficient context. Custom callbacks
+receive the complete original dictionaries within the same size bound.
+
+## Migration
+
+Format version 6 uses exact input keys; version 5 normalized entries start cold.
+Existing counter data remains inspectable. `metadata_paths` defaults to empty;
+there is no automatic authority to ignore generated IDs or timestamps. History
+alignment and response rebinding are removed from cache reuse. The internal pair
+preparation helpers and old callback mapping fields are removed. Callbacks now
+need explicit segment coverage. Review timeout changes from 90 to 10 seconds.
+Logging remains silent and redacted by default; root logging is untouched.
 
 Use `namespace=` to separate application/tenant scopes that are not represented
 in arguments. Function implementation and explicit `version=` separate entries;
@@ -321,7 +328,7 @@ existing reuse checks; disabled mode bypasses all of this.
 Candidates stay scoped by function, namespace, mode, rules, HTTP identity, model
 settings and tools; message roles also apply unless broader matching is enabled. Existing cache files upgrade automatically, but
 signature indexes only cover entries written after enabling the feature. Candidate
-frequency and distance never approve reuse, and this feature learns no new ID formats.
+frequency and distance never approve reuse, and signature retrieval itself learns no rules.
 
 `cache_signatures(path="cache.db", limit=20)` and
 `cached-response --path cache.db --signatures` show persistent counters ordered by
@@ -333,19 +340,9 @@ settings do not control them. Counters contain hashes and numbers, with no input
 excerpts. They accumulate until the cache database is removed. Existing response
 payloads in that database still retain original inputs and outputs.
 
-## Broader matching
+## Broader retrieval
 
-`structural_matching=True` changes the existing pair check and scope; there is
-no second candidate index or fallback matcher. It needs no NLTK dependency.
-Role/function alignment is bounded to 256 messages and includes the producing
-function for tool results. Every system/developer/user message must align and
-remain exact after mapping. Unknown roles or a changed terminal role reject.
-
-Matching structured locations and string contexts can anchor one-to-one IDs even
-with extra occurrences. Added/removed tool or assistant data may reach review;
-all full inputs remain in the evidence. Changed opaque state, unmapped output
-IDs and type changes at aligned locations still reject before model review.
-No alignment metadata or similarity score substitutes for full-pair review.
-
-Run `python examples/minimal/structural_pairs.py` to compare the option off/on.
-This example uses a synthetic verifier and requires no credentials.
+`structural_matching=True` omits message roles from candidate grouping. It does
+not permit changed histories, targets, instructions or opaque state. It requires
+no NLTK dependency. `examples/minimal/structural_pairs.py` demonstrates that even
+an approving model cannot override these guards.

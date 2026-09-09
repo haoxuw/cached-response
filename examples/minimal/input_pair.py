@@ -29,6 +29,7 @@ def test_verifier(evidence):
     reviews.append(evidence["verification_kind"])
     return {
         "safe_to_reuse": True,
+        "segments": [0],
         "reason": "Approve this synthetic test pair.",
     }
 
@@ -37,6 +38,7 @@ with TemporaryDirectory(prefix="cached-response-pair-") as directory:
 
     @cached_llm_response(
         mode="testing",
+        metadata_paths=("messages.*.content.note",),
         min_words=0,
         path=Path(directory) / "cache.db",
         verifier_overrider=test_verifier,
@@ -46,7 +48,7 @@ with TemporaryDirectory(prefix="cached-response-pair-") as directory:
         return {"action": "inspect", "target": "job_ab12cd34"}
 
     ask(request("job_ab12cd34", "No trace."))
-    result = ask(request("job_ef56ab78", "Trace trace_0123abcd was recorded."))
+    result = ask(request("job_ab12cd34", "Trace trace_0123abcd was recorded."))
     stats = cache_stats()
     print(
         json.dumps(

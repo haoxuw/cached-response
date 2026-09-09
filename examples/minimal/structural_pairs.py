@@ -1,4 +1,4 @@
-"""Synthetic approval demonstrating generic ID and history alignment."""
+"""Changed targets and histories miss even with an approving verifier."""
 
 import json
 from pathlib import Path
@@ -42,8 +42,8 @@ with TemporaryDirectory() as directory:
         ask(request("job_ab12cd34"))
         result = ask(request("job_ef56ab78", extra=True))
         assert result["target"] == "job_ef56ab78"
-        assert len(calls) == (1 if enabled else 2)
-        assert len(reviews) == int(enabled)
+        assert len(calls) == 2
+        assert len(reviews) == 0
         print(
             json.dumps(
                 {

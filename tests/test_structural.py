@@ -6,8 +6,8 @@ import pytest
 from cached_response import cached_llm_response
 from cached_response import matching
 from cached_response.adapters import verification_text
-from cached_response.matching import reference_view
-from cached_response.normalize import dumps, normalize
+from cached_response.config import Config
+from cached_response.normalize import dumps
 from cached_response.matching import PairRejected
 
 
@@ -20,9 +20,7 @@ def request(target='job_ab12cd34', events=None):
 
 
 def prepare(a,b,result):
-    old,ob=reference_view(normalize(a,'testing'))
-    new,nb=reference_view(normalize(b,'testing'))
-    return matching.prepare(old,new,ob,nb,result, broad=True)
+    return matching.prepare(a,b,result,Config(metadata_paths=('messages.*.content.note',)))
 
 
 def test_shared_settings_roundtrip_preserves_types_and_literal_fields():
@@ -49,12 +47,7 @@ def test_large_shared_verifier_context_reaches_callback_without_dropping_inputs(
     a,b=request(),request(events=[{'state':'ready'}])
     a['tools']=b['tools']=[{'description':'tool schema '*16000}]
     ask(a);ask(b)
-    assert len(calls)==2 and len(judges)==1
-    assert judges[0]['old_input']==a and judges[0]['new_input']==b
-    instruction,text=verification_text(judges[0])
-    assert len(text)+len(instruction)<300000
-    packed=json.loads(text)
-    assert {**packed['shared_input'], **packed['old_input']}==a
+    assert len(calls)==2 and not judges  # Undeclared state changes never reach a judge.
 
 
 @pytest.mark.parametrize('mode',['testing','risky'])
@@ -68,10 +61,8 @@ def test_additional_id_occurrences_and_history_require_approval(tmp_path,mode):
     a,b=request(),request('job_ef56ab78',events=[{'target':'job_ef56ab78','state':'ready'}])
     b['messages'].insert(2,{'role':'assistant','content':'A progress note.'})
     ask(a)
-    assert ask(b)=={'action':'inspect','target':'job_ef56ab78'}
-    assert len(calls)==len(judges)==1
-    assert judges[0]['old_input']==a and judges[0]['new_input']==b
-    assert judges[0]['new_input']['messages'][2]['content']=='A progress note.'
+    assert ask(b)=={'action':'inspect','target':'job_ab12cd34'}
+    assert len(calls)==2 and not judges
 
 
 @pytest.mark.parametrize('change',['instruction','split','merge','opaque','type','inserted_opaque','unknown_role'])
@@ -123,7 +114,8 @@ def test_tool_results_align_with_their_producing_function():
     new=copy.deepcopy(old)
     new[3:3]=[{'role':'assistant','tool_calls':[{'id':'c','function':{'name':'extra'}}]},
                {'role':'tool','tool_call_id':'c','content':'result'}]
-    assert matching.message_pairs(old,new)==[(0,0),(1,1),(2,2),(3,5),(4,6)]
+    with pytest.raises(PairRejected, match='pair_sequence_changed'):
+        prepare({'messages':old}, {'messages':new}, 'inspect')
 
 
 @pytest.mark.parametrize('changed_state',[False,True])
@@ -135,15 +127,11 @@ def test_signed_call_ids_preserve_opaque_suffix(changed_state):
     for body,call in [(a,old),(b,new)]:
         body['messages'].insert(2,{'role':'assistant','tool_calls':[{'id':call,'function':{'name':'inspect','arguments':'{}'}}]})
         body['messages'][3]['tool_call_id']=call
-    if changed_state:
-        with pytest.raises(PairRejected,match='pair_provider_state_changed'):
-            prepare(a,b,{'action':'inspect'})
-    else:
-        assert prepare(a,b,{'action':'inspect'})[0]=={'action':'inspect'}
+    with pytest.raises(PairRejected):
+        prepare(a,b,{'action':'inspect'})
 
 
-def test_alignment_work_is_bounded():
+def test_unchanged_history_needs_no_pair_review():
     body=request()
-    body['messages'] += [{'role':'tool','content':'result'}]*matching.MAX_MESSAGES
-    with pytest.raises(PairRejected,match='history_alignment_limit'):
+    with pytest.raises(PairRejected,match='metadata_segment_limit'):
         prepare(body,body,'answer')

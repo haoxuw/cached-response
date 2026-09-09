@@ -54,7 +54,7 @@ def test_same_signature_does_not_authorize_reuse(tmp_path):
     ask(request('ready'))
     ask(request('error'))
     assert len(calls) == 2
-    assert len(judges) == 1
+    assert not judges
     assert any(r['kind'] == 'masked' and r['requests'] == r['misses'] == 2 for r in cache_signatures(path=tmp_path / 'cache.db'))
 
 
@@ -64,8 +64,8 @@ def test_signature_retrieval_recovers_older_candidate(tmp_path, mode):
     enabled = False
     def verifier(evidence):
         judges.append(evidence)
-        return {'safe_to_reuse': enabled, 'reason': 'specific test fixture'}
-    @cached_llm_response(mode=mode, min_words=0, signature_matching=True,
+        return {'safe_to_reuse': enabled, 'segments': [0], 'reason': 'specific test fixture'}
+    @cached_llm_response(mode=mode, min_words=0, signature_matching=True, metadata_paths=('messages.*.content.note',),
                          path=tmp_path / 'cache.db', verifier_overrider=verifier)
     def ask(body):
         calls.append(body)
