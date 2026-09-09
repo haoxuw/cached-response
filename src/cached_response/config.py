@@ -44,6 +44,19 @@ class Rule:
     pattern: str
     paths: tuple[str, ...] = ("messages.*.content",)
 
+    @classmethod
+    def preset(cls, name, *, paths):
+        """Recognize a value format; the caller must establish its irrelevance."""
+        from .normalize import ISO_TIME, UUID
+
+        patterns = {
+            "uuid": UUID,
+            "iso_time": ISO_TIME,
+            "hex_id": r"[A-Fa-f0-9]{8,128}",
+            "digits": r"[0-9]{1,32}",
+        }
+        return cls(name, patterns[name], tuple(paths))
+
 
 @dataclass(frozen=True)
 class Config:
@@ -75,6 +88,10 @@ class Config:
         default=None, compare=False, repr=False
     )
     metadata_paths: tuple[str, ...] = ()
+    metadata_rules: tuple[Rule, ...] = ()
+    diagnostic_capture: Callable | None = field(
+        default=None, compare=False, repr=False
+    )
     verifier_model: str | None = None
     verifier_options: dict = field(default_factory=dict)
     verifier_version: str = "1"
@@ -117,6 +134,10 @@ class Config:
             raise ValueError("verifier_options must be a dictionary")
         if self.verifier_timeout <= 0:
             raise ValueError("Require verifier_timeout > 0")
+        for rule in self.metadata_rules:
+            re.compile(rule.pattern)
+            if not rule.paths or any(not p for p in rule.paths):
+                raise ValueError("metadata_rules require explicit paths")
 
 
 _config = Config()

@@ -22,7 +22,6 @@ from . import adapters, matching, signatures
 from .config import refresh_probability, settings
 from .diagnostics import (
     MissDiagnostic,
-    binding_summary,
     cache_misses,
     remember,
 )
@@ -172,6 +171,11 @@ class Ticket:
                 self.store.put(self.key, self.owner, payload)
                 if self.matching_scope:
                     self.store.index(self.matching_scope, self.key)
+                    metadata_scope = matching.metadata_scope(
+                        self.matching_scope, self.body, self.config
+                    )
+                    if metadata_scope:
+                        self.store.index(metadata_scope, self.key)
                 if self.signature_info:
                     self.store.index_signatures(*self.signature_info, self.key)
                 if (
@@ -190,7 +194,9 @@ class Ticket:
 def prepare(body, scope, config, llm, verifier=None):
     """Returns (ticket, cached envelope). A None ticket means bypass."""
     diagnostic = (
-        MissDiagnostic(body, config) if llm and config.diagnostics else None
+        MissDiagnostic(body, config)
+        if llm and (config.diagnostics or config.diagnostic_capture)
+        else None
     )
     store = None
     signature_info = None
@@ -224,6 +230,8 @@ def prepare(body, scope, config, llm, verifier=None):
                 details = diagnostic.finish(
                     store, candidate_scope, normalized, reason
                 )
+                if config.diagnostic_capture:
+                    config.diagnostic_capture(diagnostic, details)
             except Exception as exc:
                 details = {"diagnostic_error": type(exc).__name__}
         record("miss", reason, config, key, details)
@@ -233,16 +241,14 @@ def prepare(body, scope, config, llm, verifier=None):
         return None, None
     if store is None:
         store = get_store(str(config.path))
-    normalized = (
-        normalize(body, config.mode, config.rules)
-        if llm
-        else Normalized(body, {})
-    )
+    normalized = None
     matching_scope = (
         matching.scope_key(
             scope, body, config, include_roles=not config.structural_matching
         )
-        if llm and config.mode in ("testing", "risky") and config.learning
+        if llm
+        and config.mode in ("testing", "risky")
+        and (config.learning or config.metadata_rules)
         else None
     )
     diagnostic_scope = (
@@ -306,18 +312,10 @@ def prepare(body, scope, config, llm, verifier=None):
                 except Exception as exc:
                     rejected = True
                     if diagnostic is not None:
-                        details = (
-                            binding_summary(
-                                payload.get("bindings", {}), normalized.bindings
-                            )
-                            if rejection_reason == "rebind_failed"
-                            else {}
-                        )
                         diagnostic.reject(
                             key,
                             rejection_reason,
                             error=type(exc).__name__,
-                            **details,
                         )
                 else:
                     record(
@@ -331,6 +329,12 @@ def prepare(body, scope, config, llm, verifier=None):
                 diagnostic.reject(
                     key, "refresh", refresh_probability=probability
                 )
+        if normalized is None:
+            normalized = (
+                normalize(body, config.mode, config.rules)
+                if diagnostic is not None
+                else Normalized(body, {})
+            )
         if store.claim(key, owner, config.lease_seconds):
             # Another producer may have committed between get() and claim().
             # Recheck under our lease before making a duplicate upstream call.
@@ -338,7 +342,11 @@ def prepare(body, scope, config, llm, verifier=None):
             if latest != entry:
                 store.release(key, owner)
                 continue
-            if entry is None and matching_scope and verifier:
+            if (
+                entry is None
+                and matching_scope
+                and (verifier or config.metadata_rules)
+            ):
                 try:
                     result = matching.lookup(
                         store,

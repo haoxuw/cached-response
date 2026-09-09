@@ -44,6 +44,7 @@ def policy(config):
     return {
         "version": 1,
         "metadata_paths": config.metadata_paths,
+        "metadata_rules": [vars(rule) for rule in config.metadata_rules],
         "verifier_model": config.verifier_model,
         "verifier_options": config.verifier_options,
         "verifier_version": config.verifier_version,
@@ -83,6 +84,53 @@ class PairRejected(ValueError):
     def __init__(self, reason, path=()):
         super().__init__(reason)
         self.reason, self.path = reason, path
+
+
+def ruled(path, old, new, config):
+    """Explicit caller-reviewed rules match both complete metadata values."""
+    return any(
+        any(fnmatchcase(".".join(map(str, path)), p) for p in rule.paths)
+        and re.fullmatch(rule.pattern, old)
+        and re.fullmatch(rule.pattern, new)
+        for rule in config.metadata_rules
+    )
+
+
+def metadata_scope(scope, body, config):
+    """Index declared metadata shapes; prepare() still checks every full pair."""
+    if not config.metadata_rules and not config.metadata_paths:
+        return None
+
+    def walk(value, path=(), editable=False):
+        if len(path) == 3 and path[0] == "messages" and path[2] == "content":
+            editable = body["messages"][path[1]].get("role") == "tool"
+            if editable and isinstance(value, str):
+                expanded = expand(value)
+                if isinstance(expanded, (dict, list)):
+                    value = expanded
+        if path == ("metadata",):
+            editable = True
+        if any(k in PROTECTED for k in path):
+            return value
+        if isinstance(value, dict):
+            return {k: walk(v, (*path, k), editable) for k, v in value.items()}
+        if isinstance(value, list):
+            return [walk(v, (*path, i), editable) for i, v in enumerate(value)]
+        if (
+            editable
+            and isinstance(value, str)
+            and (
+                ruled(path, value, value, config)
+                or any(
+                    fnmatchcase(".".join(map(str, path)), p)
+                    for p in config.metadata_paths
+                )
+            )
+        ):
+            return {"cached_response_metadata": True}
+        return value
+
+    return digest({"scope": scope, "metadata_shape": walk(body)})
 
 
 def prepare(old, new, response, config):
@@ -149,9 +197,12 @@ def prepare(old, new, response, config):
             and b
             and max(len(a), len(b)) <= 512
             and all("." not in str(k) for k in path)
-            and any(
-                fnmatchcase(".".join(map(str, path)), p)
-                for p in config.metadata_paths
+            and (
+                any(
+                    fnmatchcase(".".join(map(str, path)), p)
+                    for p in config.metadata_paths
+                )
+                or ruled(path, a, b, config)
             )
         ):
             raise PairRejected("undeclared_or_meaningful_change", path)
@@ -244,9 +295,19 @@ def lookup(
             for item in store.candidates(scope, MAX_CANDIDATES)
         ]
     )
-    candidates.sort(
-        key=lambda item: signatures.distance(item[2]["input"], body)
-    )
+    shape_scope = metadata_scope(scope, body, config)
+    if shape_scope:
+        indexed = store.candidates(shape_scope, MAX_CANDIDATES)
+        seen = {item[0] for item in indexed}
+        candidates = [(*item, "metadata") for item in indexed] + [
+            item for item in candidates if item[0] not in seen
+        ]
+    # Without a metadata declaration no changed pair can pass the guard.
+    # Still record rejection reasons, but avoid pointless fuzzy ranking.
+    if config.metadata_paths or config.metadata_rules:
+        candidates.sort(
+            key=lambda item: signatures.distance(item[2]["input"], body)
+        )
     for key, created, payload, source in candidates:
         if diagnostic is not None:
             diagnostic.observe(key, created, payload)
@@ -277,6 +338,13 @@ def lookup(
                 continue
             result = payload["result"]
             adapters.unpack(result)
+            if all(
+                ruled(s["path"], s["old"], s["new"], config) for s in segments
+            ):
+                return result, "metadata_rule"
+            if not config.learning or verifier is None:
+                reject("verification_disabled")
+                continue
             base = {
                 "scope": scope,
                 "policy": policy(config),

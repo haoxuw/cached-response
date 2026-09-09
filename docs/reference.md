@@ -199,7 +199,9 @@ cost and cannot prove equivalence.
 ## Verification
 
 Testing/risky mode compares up to eight recent candidates, plus eight per enabled
-signature bucket. One model review is allowed per lookup, including errors.
+signature bucket and eight from the declared-metadata index. One model review is
+allowed per lookup, including errors. Metadata indexing masks only declared
+fields for retrieval; the full pair still has to pass all guards.
 
 Declare `metadata_paths=("messages.*.content.diagnostic_trace",)` only when the
 application contract says those values cannot affect the answer or action.
@@ -210,6 +212,15 @@ stay exact. Each changed value must be nonempty and at most 512 characters;
 there can be at most 16 changes. Repeated values, output references, and references
 in unchanged context reject reuse. Bytes/tuple response envelopes are not eligible
 for broader reuse. No identifier rebinding takes place.
+
+`metadata_rules=(Rule.preset("uuid", paths=("metadata.trace",)),)` adds a
+caller-reviewed rule. Presets also include `iso_time`, `hex_id` and `digits`.
+Custom `Rule(name, pattern, paths)` expressions must match both complete string
+values. Rules skip model review only when they cover every changed segment after
+the guards and validator pass. They work with `learning=False`, only in testing
+and risky modes, and do not renew answer age. They are part of the cache policy.
+Use bounded patterns without nested repetition; custom regexes are trusted caller
+configuration. The existing `rules` option remains candidate-only.
 
 `verifier_model` selects a separate model through the original function or HTTP
 connection. `verifier_options` supplies provider-specific parameters such as
@@ -272,6 +283,45 @@ alignment and response rebinding are removed from cache reuse. The internal pair
 preparation helpers and old callback mapping fields are removed. Callbacks now
 need explicit segment coverage. Review timeout changes from 90 to 10 seconds.
 Logging remains silent and redacted by default; root logging is untouched.
+
+Adding `metadata_rules` to the policy invalidates earlier policy keys once, even
+when the setting is empty. Keep the database between later runs to measure warm
+behavior. Exact hits skip normalization. Diagnostics cache up to 32 candidate
+summaries; each cached source string is limited to 262,144 characters. Larger
+inputs still receive diagnostics without entering that in-memory summary cache.
+
+## Agent-guided configuration
+
+`cached-response --skill` prints the bundled skill without opening a database.
+`cached-response --install-skill DIR` writes
+`DIR/configure-cached-response/SKILL.md` and refuses to overwrite an existing file.
+Pip installation never modifies an agent's configuration automatically.
+
+High-similarity miss examples include `next_step` with the skill name, read
+command, capture API and authorization requirement. This is a hint for an agent,
+not an automatic action. See [blocked-hit examples](learning-from-misses.md).
+
+`capture_misses(path, include_text=False, limit=10, seconds=300,
+max_bytes=8_000_000)` is a process-wide temporary capture context. It writes a new
+JSONL file with mode 0600 on Unix. It captures misses in the serving process,
+including when ordinary diagnostics are disabled. Disabled caching and explicit
+cache bypasses do not produce capture records. Decorator-level capture hooks
+override process defaults.
+
+By default records contain redacted differences. `include_text=True` explicitly
+adds the full current input and the closest candidate's input and cached response.
+There is no new response yet at lookup time. Record and byte limits bound writes;
+the deadline stops new captures, and context exit closes the file and restores
+the previous hook. Oversized records are skipped whole. The yielded dictionary
+reports `written`, `skipped` and `bytes`. The byte budget limits file size, not the
+size of an incoming request held by the application.
+
+Capture does not reconfigure logging or upload anything. Raw request bodies can
+contain secrets; use authorized test traffic and keep files private. Redaction
+always applies to default capture excerpts, even if `diagnostic_text=True` was
+separately enabled. A custom `diagnostic_capture(diagnostic, details)` hook is
+trusted process-local code with access to raw candidates; errors fail open to the
+original function. Prefer the bounded context manager for investigations.
 
 Use `namespace=` to separate application/tenant scopes that are not represented
 in arguments. Function implementation and explicit `version=` separate entries;

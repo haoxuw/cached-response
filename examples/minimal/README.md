@@ -30,6 +30,10 @@ stand-in and a rejecting verifier, with no API calls. Inspect `cache_stats()` an
 `cache_misses()` inside your application process for its own results. File logging
 is optional through `configure_logging(path="cache_diagnostics.log")`.
 
+Run `python examples/minimal/metadata_rules.py` to try caller-reviewed rules.
+Two changed trace labels reuse the answer; a changed resource status misses.
+It prints four results and reports two upstream calls, with no network access.
+
 
 `signature_counts.py` exercises persistent masked and NLTK signature counters.
 Install `.[signatures]`, run `python -m nltk.downloader words` once, then

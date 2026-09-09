@@ -35,7 +35,7 @@ by default.
 
 1. Reuse exact inputs only within the same caller, settings, policy, and freshness window.
 2. Find similar candidates, but reject every change outside explicitly declared irrelevant metadata.
-3. Review remaining changes with a fast model; save exact approvals and tightly scoped metadata patterns.
+3. Reuse reviewed metadata rules, or ask a fast model and save its scoped approval.
 
 Responses use exact input keys. Regexes recognize UUIDs, timestamps, and generated
 IDs for candidate search only. Optional masked and NLTK word signatures find more
@@ -60,13 +60,30 @@ def ask_llm(request):
     return your_model_call(request)
 ```
 
+Already checked that a field is irrelevant? Skip the review call with an explicit
+rule. Both complete values must match; the same safety checks still apply:
+
+```python
+from cached_response import Rule, configure
+
+configure(mode="testing", metadata_rules=(
+    Rule.preset("uuid", paths=("messages.*.content.diagnostic_trace",)),
+))
+```
+
+Presets recognize `uuid`, `iso_time`, `hex_id`, and `digits` string formats. Use
+`Rule(name, pattern, paths)` for a custom regex. A format does not prove a field
+is irrelevant: never declare a target, deadline or fact just to get more hits.
+Metadata indexing finds matching contexts even after unrelated entries arrive.
+
 The verifier sees numbered changed fields, both full inputs, and the cached
 response. It must review every change. Saved approvals cover the exact pair,
 response and policy; they expire with the original response. Optional learned
 regexes cover only declared metadata under identical surrounding context.
 Generated regexes are restricted to bounded character classes, never arbitrary
-expressions. `learning=False` disables this path. `metadata_paths=()` is the
-default, so changed inputs miss unless you explicitly declare metadata.
+expressions. `learning=False` disables model review; caller-reviewed
+`metadata_rules` still work. Both metadata settings default to empty, so changed
+inputs miss unless you explicitly declare metadata.
 
 The built-in verifier uses your original connection with a separate model when
 configured. It removes inherited thinking settings and tools. Configure reasoning
@@ -129,6 +146,7 @@ Set options directly on either decorator:
 | `min_words=100` | Minimum input length for the LLM decorator only. |
 | `learning=False` | Turn off model verification for the LLM decorator. |
 | `metadata_paths=()` | Exact dotted string paths or wildcards declaring irrelevant metadata. |
+| `metadata_rules=()` | Reviewed regexes for irrelevant string fields; reuse without a review call. |
 | `verifier_version="1"` | Change this when your verifier policy or callback changes. |
 | `verifier_model=None` | Separate review model; `None` uses the original model. |
 | `verifier_timeout="10s"` | Maximum time spent waiting for each review. |
@@ -178,5 +196,35 @@ inputs and responses for matching and replay.
 Run `python examples/minimal/miss_diagnostics.py` for a local demonstration with
 no model/API calls. See [captured demo output](docs/miss-diagnostics-output.json)
 and [diagnostic details and limitations](docs/reference.md#miss-diagnostics).
+
+## Learn from real misses
+
+The package ships an agent skill. Read it or copy it into your project's skills:
+
+```sh
+cached-response --skill
+cached-response --install-skill .agents/skills
+```
+
+Ask your agent to use `configure-cached-response` on a repeated test. It inspects
+misses, checks which fields are irrelevant, proposes narrow rules, and measures
+correctness and total time. High-similarity misses include a `next_step` pointing
+to this skill. It cannot automatically enable logging or change your rules.
+
+When authorized test traffic needs full context, run this in the serving process:
+
+```python
+from cached_response import capture_misses
+
+with capture_misses("private/pairs.jsonl", include_text=True,
+                    limit=10, seconds=300) as capture:
+    run_real_test()  # Your test entry point
+print(capture)      # written, skipped, bytes
+```
+
+Capture defaults to redacted output. Raw capture includes complete request pairs
+and cached answers in a new private file, capped at 8 MB by default; oversized
+records are skipped. The hook restores on exit. Keep raw files out of commits.
+See [real blocked-hit patterns and the learning workflow](docs/learning-from-misses.md).
 
 [Runnable examples](examples/minimal/README.md) · [All settings](docs/reference.md)
