@@ -273,6 +273,31 @@ def normalize(body, mode, rules=()):
     return Normalized(canonical, bindings)
 
 
+SIGNED_HANDLE_FORMAT = "call_h{:04d}"
+
+
+def signed_handles(body):
+    """Replace each distinct signed call token with a first-seen stable handle.
+
+    For cache keying only: a provider that mints a fresh thought signature on
+    every generation makes repeated conversations unequal past their first
+    tool call, even when everything meaningful matches. Handles are assigned
+    in first-seen order, so two repetitions whose signed calls align
+    positionally produce identical keys. The stored response keeps its real
+    bytes; nothing rendered to the caller or sent to a provider is touched.
+    """
+    text = dumps(body)
+    handles = {}
+
+    def handle(match):
+        token = match.group()
+        if token not in handles:
+            handles[token] = SIGNED_HANDLE_FORMAT.format(len(handles))
+        return handles[token]
+
+    return json.loads(SIGNED_ID.sub(handle, text))
+
+
 def rebind(value, previous, current):
     """Simultaneous, bounded substitutions; never cascade replacements."""
     if previous.keys() != current.keys():

@@ -110,6 +110,7 @@ class Config:
     diagnostics: bool = True
     signature_matching: bool = False
     structural_matching: bool = False
+    signed_call_handles: bool = False
     diagnostic_text: bool = False
     diagnostic_raw_inputs: bool = False
     near_miss_threshold: float = 0.90
