@@ -267,3 +267,8 @@ records are skipped. The hook restores on exit. Keep raw files out of commits.
 See [real blocked-hit patterns and the learning workflow](docs/learning-from-misses.md).
 
 [Runnable examples](examples/minimal/README.md) · [All settings](docs/reference.md)
+## Numeric test metadata
+
+Repeated tests may change unused timestamps or process IDs. Opt-in
+[typed metadata rules](docs/test-metadata.md) give those fields a stable value
+before lookup and inference. Other facts remain unchanged.

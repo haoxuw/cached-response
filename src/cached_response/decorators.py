@@ -30,6 +30,7 @@ from .normalize import (
     digest,
     dumps,
     normalize,
+    project_test_metadata,
     word_count,
 )
 from .storage import get_store
@@ -542,8 +543,11 @@ def decorate(function, llm, overrides, version):
         alias_enabled = (
             llm and config.test_aliases and config.mode in ("testing", "risky")
         )
+        metadata_enabled = (
+            llm and config.test_metadata and config.mode in ("testing", "risky")
+        )
         if (llm and config.mode == "disabled") or (
-            not use_cache and not alias_enabled
+            not use_cache and not alias_enabled and not metadata_enabled
         ):
             return function(*args, **kwargs)
         try:
@@ -557,6 +561,9 @@ def decorate(function, llm, overrides, version):
             aliases = None
         if aliases:
             body = aliases.body
+        if metadata_enabled:
+            body = project_test_metadata(body, config.test_metadata)
+        if aliases or metadata_enabled:
             args, kwargs = adapters.replace_input(function, args, kwargs, body)
         verifier = config.verifier_overrider
         if (
@@ -604,8 +611,11 @@ def decorate(function, llm, overrides, version):
         alias_enabled = (
             llm and config.test_aliases and config.mode in ("testing", "risky")
         )
+        metadata_enabled = (
+            llm and config.test_metadata and config.mode in ("testing", "risky")
+        )
         if (llm and config.mode == "disabled") or (
-            not use_cache and not alias_enabled
+            not use_cache and not alias_enabled and not metadata_enabled
         ):
             return await function(*args, **kwargs)
         try:
@@ -633,6 +643,9 @@ def decorate(function, llm, overrides, version):
             aliases = None
         if aliases:
             body = aliases.body
+        if metadata_enabled:
+            body = project_test_metadata(body, config.test_metadata)
+        if aliases or metadata_enabled:
             args, kwargs = adapters.replace_input(function, args, kwargs, body)
             request = adapters.http_request(args, kwargs)
         verifier = config.verifier_overrider

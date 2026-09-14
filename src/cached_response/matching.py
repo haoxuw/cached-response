@@ -48,6 +48,11 @@ def policy(config):
         "version": 1,
         "metadata_paths": config.metadata_paths,
         "metadata_rules": [vars(rule) for rule in config.metadata_rules],
+        **(
+            {"test_metadata": [vars(rule) for rule in config.test_metadata]}
+            if config.test_metadata
+            else {}
+        ),
         "verifier_model": config.verifier_model,
         "verifier_options": config.verifier_options,
         "verifier_version": config.verifier_version,

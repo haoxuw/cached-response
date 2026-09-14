@@ -431,3 +431,9 @@ payloads in that database still retain original inputs and outputs.
 not permit changed histories, targets, instructions or opaque state. It requires
 no NLTK dependency. `examples/minimal/structural_pairs.py` demonstrates that even
 an approving model cannot override these guards.
+# Numeric test contracts
+
+`test_metadata` accepts a tuple of `TestMetadata(tool, paths, value_type="int")`
+rules. It defaults to empty and applies only in testing/risky mode. These rules
+change declared tool-result numbers before inference as well as lookup; see
+[examples, safeguards and the future learning flow](test-metadata.md).

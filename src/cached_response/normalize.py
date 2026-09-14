@@ -1,5 +1,6 @@
 """Small, deterministic normalizers. Format recognition is a heuristic."""
 
+import copy
 import fnmatch
 import hashlib
 import json
@@ -67,6 +68,81 @@ def word_count(body):
     else:
         text = strings(body)
     return sum(len(part.split()) for part in text)
+
+
+def project_test_metadata(body, rules):
+    """Apply an explicit test contract only to linked tool-result numbers."""
+    if (
+        not rules
+        or not isinstance(body, dict)
+        or not isinstance(body.get("messages"), list)
+    ):
+        return body
+    result = copy.deepcopy(body)
+    calls = {}
+    matched = False
+
+    def unique_object(pairs):
+        value = dict(pairs)
+        if len(value) != len(pairs):
+            raise ValueError("Ambiguous JSON object")
+        return value
+
+    def walk(value, path, selected):
+        nonlocal matched
+        if isinstance(value, dict):
+            return {
+                key: item
+                if key in PROTECTED or key == "*"
+                else walk(item, (*path, key), selected)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [walk(item, (*path, "*"), selected) for item in value]
+        for rule in selected:
+            kind = int if rule.value_type == "int" else float
+            if path in rule.paths and type(value) is kind:
+                matched = True
+                return kind(0)
+        return value
+
+    for message in result.get("messages", []):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                token = call.get("id")
+                function = call.get("function")
+                if isinstance(token, str) and isinstance(function, dict):
+                    # Reused IDs cannot establish an unambiguous tool link.
+                    calls[token] = (
+                        None if token in calls else function.get("name")
+                    )
+        if message.get("role") != "tool":
+            continue
+        token = message.get("tool_call_id")
+        tool = calls.get(token) if isinstance(token, str) else None
+        if not tool or message.get("name", tool) != tool:
+            continue
+        selected = [rule for rule in rules if rule.tool == tool]
+        content = message.get("content")
+        matched = False
+        if not selected:
+            continue
+        if isinstance(content, str):
+            try:
+                parsed = json.loads(content, object_pairs_hook=unique_object)
+                dumps(parsed)  # Nonfinite numbers are not valid JSON metadata.
+            except ValueError:
+                continue
+            projected = walk(parsed, (), selected)
+            if matched:
+                message["content"] = dumps(projected)
+        elif isinstance(content, (dict, list)):
+            message["content"] = walk(content, (), selected)
+    return result
 
 
 @dataclass
