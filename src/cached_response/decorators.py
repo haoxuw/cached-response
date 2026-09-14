@@ -31,6 +31,7 @@ from .normalize import (
     dumps,
     normalize,
     project_test_metadata,
+    signed_handles,
     word_count,
 )
 from .storage import get_store
@@ -494,6 +495,10 @@ def decorate(function, llm, overrides, version):
 
     def ready(body, extra, config, verifier=None, original_input=None):
         try:
+            if llm and config.signed_call_handles:
+                # Key on stable handles for provider-signed call tokens; the
+                # live input and the stored response keep their real bytes.
+                body = signed_handles(body)
             return prepare(
                 body,
                 scope(extra),

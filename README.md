@@ -7,6 +7,9 @@ dependencies. Python 3.11+.
 python -m pip install cached-response
 ```
 
+Start here: [integration guide and shipped rule recipes](src/cached_response/skills/configure-cached-response/integration.md).
+It explains where to add the decorator, configure rules, and measure misses.
+
 ## cached_llm_response
 
 Reuse LLM answers during repeated tests. Add an import and a decorator to your

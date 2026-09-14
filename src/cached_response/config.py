@@ -54,6 +54,7 @@ class Rule:
             "iso_time": ISO_TIME,
             "hex_id": r"[A-Fa-f0-9]{8,128}",
             "digits": r"[0-9]{1,32}",
+            "task_id": r"t_[A-Za-z0-9_-]{6,126}",
         }
         return cls(name, patterns[name], tuple(paths))
 
@@ -109,6 +110,7 @@ class Config:
     diagnostics: bool = True
     signature_matching: bool = False
     structural_matching: bool = False
+    signed_call_handles: bool = False
     diagnostic_text: bool = False
     diagnostic_raw_inputs: bool = False
     near_miss_threshold: float = 0.90

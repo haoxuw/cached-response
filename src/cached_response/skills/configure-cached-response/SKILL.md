@@ -5,6 +5,8 @@ description: Diagnose missed cached-response hits using real test traffic, confi
 
 # Configure cached-response
 
+For a new integration, read [the self-contained setup and rule guide](integration.md) first.
+
 Improve repeated-test speed while keeping meaningful changes as misses. Work in
 the caller's configuration; do not add application-specific patterns to the package.
 
