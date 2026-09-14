@@ -572,10 +572,19 @@ def decorate(function, llm, overrides, version):
         aliases = alias_session(body, None, config) if alias_enabled else None
         if aliases and not aliases.mapping:
             aliases = None
+        # What the provider receives and what the cache keys on differ only
+        # for signed tool calls; see TestAliases.
+        lookup_body = body
         if aliases:
-            body = aliases.body
+            body, lookup_body = aliases.body, aliases.lookup_body
+        separate_lookup = lookup_body is not body
         if metadata_enabled:
             body = project_test_metadata(body, config.test_metadata)
+            lookup_body = (
+                project_test_metadata(lookup_body, config.test_metadata)
+                if separate_lookup
+                else body
+            )
         if aliases or metadata_enabled:
             args, kwargs = adapters.replace_input(function, args, kwargs, body)
         verifier = config.verifier_overrider
@@ -589,7 +598,7 @@ def decorate(function, llm, overrides, version):
                 adapters.verify_function, function, args, kwargs, body
             )
         ticket, cached = (
-            ready(body, None, config, verifier, original_input)
+            ready(lookup_body, None, config, verifier, original_input)
             if use_cache
             else (None, None)
         )
@@ -661,10 +670,19 @@ def decorate(function, llm, overrides, version):
         )
         if aliases and not aliases.mapping:
             aliases = None
+        # See the sync path: the provider gets the signed bytes, the cache
+        # keys on the translated form.
+        lookup_body = body
         if aliases:
-            body = aliases.body
+            body, lookup_body = aliases.body, aliases.lookup_body
+        separate_lookup = lookup_body is not body
         if metadata_enabled:
             body = project_test_metadata(body, config.test_metadata)
+            lookup_body = (
+                project_test_metadata(lookup_body, config.test_metadata)
+                if separate_lookup
+                else body
+            )
         if aliases or metadata_enabled:
             args, kwargs = adapters.replace_input(function, args, kwargs, body)
             request = adapters.http_request(args, kwargs)
@@ -696,7 +714,7 @@ def decorate(function, llm, overrides, version):
 
         ticket, cached = (
             await async_lookup(
-                ready, body, extra, config, verifier, original_input
+                ready, lookup_body, extra, config, verifier, original_input
             )
             if use_cache
             else (None, None)

@@ -78,9 +78,12 @@ original argument text before contacting the provider. This also handles clients
 that parse and reformat argument JSON. It never guesses a replacement signature.
 A signed call with no usable recording — a conversation that entered this cache
 mid-way, or arguments that no longer match — is forwarded exactly as the client
-echoed it, untranslated; those turns key on their raw IDs and simply miss. Old
-responses generated from raw task IDs are not converted into new canonical
-entries.
+echoed it, untranslated. The cache still keys that turn on the translated form,
+so two runs whose signed arguments differ only in declared test handles agree
+on a key while each run's provider receives its own signed bytes; this is the
+same lookup-only split `signed_call_handles` applies to the call ID. A real
+change inside those arguments still misses. Old responses generated from raw
+task IDs are not converted into new canonical entries.
 
 Streaming responses are buffered until complete, so IDs split across chunks can
 be rendered correctly. This delays the first token on misses. Incomplete,
