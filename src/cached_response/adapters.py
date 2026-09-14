@@ -38,6 +38,7 @@ class TestAliases:
         specification = config.test_aliases(json.loads(dumps(body)))
         self.mapping = {}
         self.body = body
+        self.cacheable = True
         if specification is None:
             return
         conversation, mapping = specification
@@ -91,21 +92,22 @@ class TestAliases:
                 before.get("tool_calls") or [], after.get("tool_calls") or []
             ):
                 original = self.store.review(self.part_key(call))
-                if original:
-                    if self.function_value(
-                        call["function"]
-                    ) != self.function_value(original):
-                        raise AliasContractUnsatisfied(
-                            "Signed tool arguments differ from original response"
-                        )
+                if original is not None and self.function_value(
+                    call["function"]
+                ) == self.function_value(original):
                     call["function"] = original
                 elif call != old_call and (
                     THOUGHT_SEPARATOR in call.get("id", "")
                     or any(k in PROTECTED for k in (*before, *call))
                 ):
-                    raise AliasContractUnsatisfied(
-                        "Original signed tool arguments are unavailable"
-                    )
+                    # No usable recording -- a conversation that entered
+                    # this cache mid-way, or an argument that no longer
+                    # matches. The client echoed the provider's signed
+                    # bytes, so forward those exact bytes; translating
+                    # them would break the provider's signature check,
+                    # and raising poisons every later turn. This call
+                    # keys on its raw IDs, so its turns simply miss.
+                    call["function"] = old_call["function"]
 
     def part_key(self, call):
         return digest({"alias_part": self.scope, "id": call.get("id")})
@@ -119,7 +121,7 @@ class TestAliases:
             pass
         return dumps(result)
 
-    def output(self, payload):
+    def output(self, payload, live=False):
         if not self.mapping:
             return payload
         if payload["kind"] not in {"json", "http", "sse"}:
@@ -128,9 +130,17 @@ class TestAliases:
             )
         rendered = translate(payload, {v: k for k, v in self.mapping.items()})
         if translate(rendered, self.mapping) != payload:
-            raise AliasContractUnsatisfied(
-                "Test aliases do not round-trip the provider response"
-            )
+            if not live:
+                # A cached payload that does not round-trip embeds another
+                # conversation's raw IDs; serving it would leak them.
+                raise AliasContractUnsatisfied(
+                    "Test aliases do not round-trip the provider response"
+                )
+            # A live payload's stray raw IDs are this conversation's own
+            # (the provider only sees this request), so the rendered form
+            # is right for the caller -- but caching it would replay those
+            # IDs into other repetitions.
+            self.cacheable = False
         values = (
             payload["value"] if payload["kind"] == "sse" else [payload["value"]]
         )
@@ -148,9 +158,12 @@ class TestAliases:
                         key = self.part_key(call)
                         old = self.store.review(key)
                         if old is not None and old != call["function"]:
-                            raise AliasContractUnsatisfied(
-                                "Provider reused a signed call ID"
-                            )
+                            if not live:
+                                raise AliasContractUnsatisfied(
+                                    "Provider reused a signed call ID"
+                                )
+                            self.cacheable = False
+                            continue
                         self.store.review(key, call["function"], self.expires)
         return rendered
 

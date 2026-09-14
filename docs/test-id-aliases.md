@@ -55,9 +55,11 @@ It must be quick and local.
 
 For multiple handles, your callback must assign stable, distinct values and a
 stable conversation key. SQLite retains earlier mappings across turns, truncated
-history and process restarts. A handle cannot change its mapping, and two handles
-cannot collapse into one. Existing canonical text cannot collide with an unrelated
-input value. Limit: 128 handles per conversation.
+history and process restarts. The first recorded binding for an ID wins: a
+proposal that renames a bound ID, reuses a bound handle, or lands past the
+512-handle-per-conversation limit is dropped, and that ID stays untranslated —
+its turns likely miss, but the conversation keeps working. Existing canonical
+text cannot collide with an unrelated input value.
 
 Change `alias_version` when the contract changes. Start fresh conversations when
 changing mode or contract; never change either midway through signed history.
@@ -74,9 +76,11 @@ The adapter keeps signature bytes unchanged. It records the original tool-call
 arguments, checks that the next turn still describes that call, and restores the
 original argument text before contacting the provider. This also handles clients
 that parse and reformat argument JSON. It never guesses a replacement signature.
-Unknown or altered signed calls raise an error instead of sending mismatched
-history. Old responses generated from raw task IDs are not converted into new
-canonical entries.
+A signed call with no usable recording — a conversation that entered this cache
+mid-way, or arguments that no longer match — is forwarded exactly as the client
+echoed it, untranslated; those turns key on their raw IDs and simply miss. Old
+responses generated from raw task IDs are not converted into new canonical
+entries.
 
 Streaming responses are buffered until complete, so IDs split across chunks can
 be rendered correctly. This delays the first token on misses. Incomplete,
@@ -86,7 +90,9 @@ Text, JSON and successful JSON/SSE HTTP responses are supported.
 Mappings and original arguments live in the cache database, with private file
 permissions. Keep this database private. They share its 4,096-record `reviews` storage
 and expire after `refresh_force` since last recorded use. Missing signed history
-fails closed; do not delete the database during an active conversation.
+fails open: the affected turns run live with the client's exact bytes and miss
+the cache, so deleting the database during an active conversation costs hits,
+not correctness.
 
 ## Prove a rule before relying on it
 

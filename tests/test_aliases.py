@@ -101,14 +101,31 @@ def test_alias_mapping_is_persistent_and_one_to_one(tmp_path):
     import time
     path=tmp_path/'cache.db'
     assert Store(path).bind_aliases('session', {OLD:CANON}, time.time()+60) == {OLD:CANON}
-    with pytest.raises(ValueError, match='changed'):
-        Store(path).bind_aliases('session', {OLD:'task_00000002'}, time.time()+60)
-    with pytest.raises(ValueError, match='one-to-one'):
-        Store(path).bind_aliases('session', {NEW:CANON}, time.time()+60)
+    # The first recorded binding wins; a renaming proposal is ignored.
+    assert Store(path).bind_aliases('session', {OLD:'task_00000002'}, time.time()+60) == {OLD:CANON}
+    # A proposal reusing a bound handle is dropped, not bound and not raised.
+    assert Store(path).bind_aliases('session', {NEW:CANON}, time.time()+60) == {OLD:CANON}
+    # A distinct new pair still binds alongside the earlier one.
+    assert Store(path).bind_aliases('session', {NEW:'task_00000002'}, time.time()+60) == {OLD:CANON,NEW:'task_00000002'}
+
+
+def test_alias_bindings_are_bounded_by_dropping_not_raising(tmp_path, monkeypatch):
+    from cached_response import storage
+    import time
+    monkeypatch.setattr(storage, 'ALIAS_BINDING_LIMIT', 2)
+    store=storage.Store(tmp_path/'cache.db')
+    first={OLD:CANON,NEW:'task_00000002'}
+    assert store.bind_aliases('session', first, time.time()+60) == first
+    overflow=store.bind_aliases('session', {**first,'task_99999999':'task_00000003'}, time.time()+60)
+    assert overflow == first
 
 
 @pytest.mark.parametrize('mutate', ['unknown', 'changed_arguments', 'changed_type'])
-def test_signed_history_must_restore_a_known_original(tmp_path, mutate):
+def test_unrestorable_signed_history_forwards_the_client_bytes(tmp_path, mutate):
+    # A signed call without a usable recording -- unknown to this cache, or
+    # with arguments that no longer match -- is forwarded exactly as the
+    # client echoed it, never translated and never raised: mismatched bytes
+    # are the provider's own signature check to accept or reject.
     config = Config(mode='testing', path=tmp_path/'cache.db', test_aliases=contract)
     session = AliasSession(request(), 'caller', config)
     response = session.output({'kind':'json','value':signed_response()})['value']
@@ -117,15 +134,23 @@ def test_signed_history_must_restore_a_known_original(tmp_path, mutate):
     if mutate == 'unknown': call['id'] += '-different-state'
     elif mutate == 'changed_arguments': call['function']['arguments'] = call['function']['arguments'].replace('"count": 1','"count": 2')
     else: call['function']['arguments'] = call['function']['arguments'].replace('"count": 1','"count": true')
-    with pytest.raises(ValueError): AliasSession(next_body, 'caller', config)
+    client_bytes = call['function']['arguments']
+    forwarded = AliasSession(next_body, 'caller', config)
+    assert forwarded.body['messages'][2]['tool_calls'][0]['function']['arguments'] == client_bytes
+    assert OLD in client_bytes and CANON not in client_bytes
 
 
 def test_alias_caller_isolation(tmp_path):
+    # Another caller cannot read this caller's recorded originals: it gets
+    # the client's echoed bytes instead of the provider-exact restoration.
     config = Config(mode='testing', path=tmp_path/'cache.db', test_aliases=contract)
     session = AliasSession(request(), 'caller', config)
     response = session.output({'kind':'json','value':signed_response()})['value']
-    with pytest.raises(ValueError, match='unavailable'):
-        AliasSession(history(request(),response), 'other-caller', config)
+    mine = AliasSession(history(request(),response), 'caller', config)
+    assert mine.body['messages'][2]['tool_calls'][0]['function']['arguments'] == ARGS
+    other = AliasSession(history(request(),response), 'other-caller', config)
+    theirs = other.body['messages'][2]['tool_calls'][0]['function']['arguments']
+    assert theirs != ARGS and OLD in theirs and CANON not in theirs
 
 
 def test_translation_preserves_raw_json_layout_and_opaque_state():

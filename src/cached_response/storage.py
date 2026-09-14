@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS reviews (key TEXT PRIMARY KEY, expires REAL NOT NULL,
 CREATE INDEX IF NOT EXISTS signature_lookup ON signature_entries(scope, kind, signature);
 """
 _stores_lock = threading.Lock()
+# Enough for an agent test whose tool results enumerate a growing task board;
+# IDs past the limit stay untranslated rather than failing the conversation.
+ALIAS_BINDING_LIMIT = 512
 
 
 class Store:
@@ -139,22 +142,34 @@ class Store:
         return json.loads(row[0]) if row else None
 
     def bind_aliases(self, key, mapping, expires):
-        """Keep caller-supplied test handles one-to-one across concurrent turns."""
+        """Keep caller-supplied test handles one-to-one across concurrent turns.
+
+        Bindings reconcile rather than raise: the first recorded binding for
+        an ID wins, and a proposal that renames a bound ID, reuses a bound
+        handle, overlaps an existing binding, or lands past the limit is
+        dropped. A dropped ID simply stays untranslated in this conversation
+        -- one likely cache miss, instead of an error that poisons every
+        later turn of the conversation.
+        """
         with self.connect() as db:
             db.execute("DELETE FROM reviews WHERE expires <= ?", (time.time(),))
             row = db.execute(
                 "SELECT payload FROM reviews WHERE key=?", (key,)
             ).fetchone()
             previous = json.loads(row[0]) if row else {}
-            if any(
-                k in previous and previous[k] != v for k, v in mapping.items()
-            ):
-                raise ValueError("Test alias changed during a conversation")
-            merged = {**previous, **mapping}
-            if len(set(merged.values())) != len(merged) or len(merged) > 128:
-                raise ValueError(
-                    "Test aliases must remain one-to-one and bounded"
-                )
+            merged = dict(previous)
+            taken = set(merged) | set(merged.values())
+            for k, v in mapping.items():
+                if k in merged:
+                    continue
+                if (
+                    k in taken
+                    or v in taken
+                    or len(merged) >= ALIAS_BINDING_LIMIT
+                ):
+                    continue
+                merged[k] = v
+                taken.update((k, v))
             self.review(key, merged, expires)
             return merged
 
