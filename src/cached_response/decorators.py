@@ -20,6 +20,12 @@ from typing import Any
 
 from . import adapters, learning
 from .config import refresh_probability, settings
+from .diagnostics import (
+    MissDiagnostic,
+    binding_summary,
+    cache_misses,
+    remember,
+)
 from .normalize import Normalized, digest, dumps, normalize, rebind, word_count
 from .storage import get_store
 
@@ -33,7 +39,7 @@ _stats = Counter()
 _stats_lock = threading.Lock()
 
 
-def cache_stats() -> dict[str, int | float]:
+def cache_stats() -> dict[str, Any]:
     """Return process-wide request counts and cache_hit_percent for enabled calls.
 
     Counts combine all decorated functions. Disabled LLM calls and use_cache=False
@@ -45,13 +51,53 @@ def cache_stats() -> dict[str, int | float]:
     result["cache_hit_percent"] = (
         100 * result.get("hit", 0) / requests if requests else 0.0
     )
+    misses = result.get("miss", 0)
+    result["cache_miss_percent"] = 100 * misses / requests if requests else 0.0
+    result["miss_reasons"] = {
+        key.removeprefix("miss_reason:"): result.pop(key)
+        for key in list(result)
+        if key.startswith("miss_reason:")
+    }
+    result["candidate_rejections"] = {
+        key.removeprefix("candidate_reason:"): result.pop(key)
+        for key in list(result)
+        if key.startswith("candidate_reason:")
+    }
+    count = result.get("miss_prompt_count", 0)
+    result["miss_prompt"] = {"count": count}
+    for metric in ("chars", "bytes", "words", "symbols", "digits", "lines"):
+        total = result.pop(f"prompt:{metric}:total", 0)
+        result["miss_prompt"][metric] = {
+            "total": total,
+            "min": result.pop(f"prompt:{metric}:min", 0),
+            "max": result.pop(f"prompt:{metric}:max", 0),
+            "mean": total / count if count else 0.0,
+        }
     return result
 
 
-def decision(kind, reason, config, key=""):
+def decision(kind, reason, config, key="", diagnostic=None):
     with _stats_lock:
         _stats["requests"] += 1
         _stats[kind] += 1
+        if kind == "miss":
+            _stats[f"miss_reason:{reason}"] += 1
+        if diagnostic is not None:
+            _stats["diagnosed_misses"] += 1
+            candidates = diagnostic.get("candidates", [])
+            _stats["misses_with_candidates"] += bool(candidates)
+            _stats["near_misses"] += bool(diagnostic.get("near_miss"))
+            _stats["candidates_missed"] += len(candidates)
+            for candidate in candidates:
+                _stats[f"candidate_reason:{candidate['reason']}"] += 1
+            if "prompt" in diagnostic:
+                first = not _stats["miss_prompt_count"]
+                _stats["miss_prompt_count"] += 1
+                for metric, value in diagnostic["prompt"].items():
+                    _stats[f"prompt:{metric}:total"] += value
+                    low, high = f"prompt:{metric}:min", f"prompt:{metric}:max"
+                    _stats[low] = value if first else min(_stats[low], value)
+                    _stats[high] = max(_stats[high], value)
     LOGGER.info(
         "Cache %s for hash: %s. reason=%s mode=%s",
         kind,
@@ -59,27 +105,53 @@ def decision(kind, reason, config, key=""):
         reason,
         config.mode,
     )
+    if diagnostic is not None:
+        event = {
+            "event": "cache_miss",
+            "key": key,
+            "reason": reason,
+            "mode": config.mode,
+            **diagnostic,
+        }
+        remember(event)
+        LOGGER.info(
+            "Cache miss diagnostic %s",
+            dumps(event),
+            extra={"cache_diagnostic": event},
+        )
     if config.report:
         stats = cache_stats()
         print(
-            f"cached-response: {kind} ({reason}); {stats.get('hit', 0)}/{stats['requests']} cached ({stats['cache_hit_percent']:.1f}%)",
+            f"cached-response: {kind} ({reason}); {stats.get('hit', 0)}/{stats['requests']} cached ({stats['cache_hit_percent']:.1f}%); "
+            f"{stats.get('miss', 0)} missed, {stats.get('near_misses', 0)} high-similarity misses",
             file=sys.stderr,
         )
 
 
 class Ticket:
     def __init__(
-        self, store, key, owner, body, normalized, config, learning_scope=None
+        self,
+        store,
+        key,
+        owner,
+        body,
+        normalized,
+        config,
+        learning_scope=None,
+        diagnostic_scope=None,
     ):
         self.store, self.key, self.owner = store, key, owner
         self.body, self.normalized, self.config = body, normalized, config
         self.learning_scope = learning_scope
+        self.diagnostic_scope = diagnostic_scope
 
     def release(self):
         try:
             self.store.release(self.key, self.owner)
-        except Exception:
-            LOGGER.debug("Cache lease release failed", exc_info=True)
+        except Exception as exc:
+            LOGGER.debug(
+                "Cache lease release failed error=%s", type(exc).__name__
+            )
 
     def save(self, result):
         try:
@@ -94,16 +166,38 @@ class Ticket:
                 self.store.put(self.key, self.owner, payload)
                 if self.learning_scope:
                     self.store.index(self.learning_scope, self.key)
-        except Exception:
-            LOGGER.debug("Response could not be cached", exc_info=True)
+                if (
+                    self.diagnostic_scope
+                    and self.diagnostic_scope != self.learning_scope
+                ):
+                    self.store.index(self.diagnostic_scope, self.key)
+        except Exception as exc:
+            LOGGER.debug(
+                "Response could not be cached error=%s", type(exc).__name__
+            )
         finally:
             self.release()
 
 
 def prepare(body, scope, config, llm, verifier=None):
     """Returns (ticket, cached envelope). A None ticket means bypass."""
+    diagnostic = (
+        MissDiagnostic(body, config) if llm and config.diagnostics else None
+    )
+
+    def miss(reason, key="", store=None, candidate_scope=None, normalized=None):
+        details = None
+        if diagnostic is not None:
+            try:
+                details = diagnostic.finish(
+                    store, candidate_scope, normalized, reason
+                )
+            except Exception as exc:
+                details = {"diagnostic_error": type(exc).__name__}
+        decision("miss", reason, config, key, details)
+
     if llm and word_count(body) < config.min_words:
-        decision("miss", "short_input", config)
+        miss("short_input")
         return None, None
     store = get_store(str(config.path))
     model_settings = (
@@ -120,9 +214,26 @@ def prepare(body, scope, config, llm, verifier=None):
         if llm
         else Normalized(body, {}, [])
     )
+    if diagnostic is not None:
+        diagnostic.learned = learned
     learning_scope = (
         learning.scope_key(scope, body, config)
         if llm and config.mode == "testing" and config.learning
+        else None
+    )
+    diagnostic_scope = (
+        digest(
+            {
+                "diagnostics": 1,
+                "scope": learning.scope_key(scope, body, config)
+                or {
+                    "scope": scope,
+                    "mode": config.mode,
+                    "rules": [asdict(rule) for rule in config.rules],
+                },
+            }
+        )
+        if diagnostic is not None
         else None
     )
     key = digest(
@@ -142,8 +253,11 @@ def prepare(body, scope, config, llm, verifier=None):
     while True:
         entry = store.get(key)
         rejected = False
+        rejection_reason = "refresh"
         if entry:
             created, payload = entry
+            if diagnostic is not None:
+                diagnostic.observe(key, created, payload)
             probability = refresh_probability(
                 time.time() - created,
                 config.refresh_start,
@@ -151,19 +265,37 @@ def prepare(body, scope, config, llm, verifier=None):
             )
             if random_draw >= probability and probability < 1:
                 try:
+                    rejection_reason = "validator_error"
                     if config.validator and not config.validator(
                         payload["input"], body
                     ):
+                        rejection_reason = "validator_rejected"
                         raise ValueError("Validator rejected the candidate")
+                    rejection_reason = "rebind_failed"
                     result = rebind(
                         payload["result"],
                         payload["bindings"],
                         normalized.bindings,
                     )
                     # Check decoding before advertising a hit.
+                    rejection_reason = "decode_failed"
                     adapters.unpack(result)
-                except Exception:
+                except Exception as exc:
                     rejected = True
+                    if diagnostic is not None:
+                        details = (
+                            binding_summary(
+                                payload.get("bindings", {}), normalized.bindings
+                            )
+                            if rejection_reason == "rebind_failed"
+                            else {}
+                        )
+                        diagnostic.reject(
+                            key,
+                            rejection_reason,
+                            error=type(exc).__name__,
+                            **details,
+                        )
                 else:
                     decision(
                         "hit",
@@ -172,6 +304,10 @@ def prepare(body, scope, config, llm, verifier=None):
                         key,
                     )
                     return None, result
+            elif diagnostic is not None:
+                diagnostic.reject(
+                    key, "refresh", refresh_probability=probability
+                )
         if store.claim(key, owner, config.lease_seconds):
             # Another producer may have committed between get() and claim().
             # Recheck under our lease before making a duplicate upstream call.
@@ -188,6 +324,7 @@ def prepare(body, scope, config, llm, verifier=None):
                         normalized,
                         config,
                         verifier,
+                        diagnostic=diagnostic,
                     )
                     if result is not None:
                         adapters.unpack(result)
@@ -199,17 +336,29 @@ def prepare(body, scope, config, llm, verifier=None):
                 except BaseException:
                     store.release(key, owner)
                     raise
-            decision(
-                "miss",
-                "rejected" if rejected else "refresh" if entry else "cold",
-                config,
+            miss(
+                rejection_reason
+                if rejected
+                else "refresh"
+                if entry
+                else "cold",
                 key,
+                store,
+                diagnostic_scope,
+                normalized,
             )
             return Ticket(
-                store, key, owner, body, normalized, config, learning_scope
+                store,
+                key,
+                owner,
+                body,
+                normalized,
+                config,
+                learning_scope,
+                diagnostic_scope,
             ), None
         if time.monotonic() >= deadline:
-            decision("miss", "busy", config, key)
+            miss("busy", key)
             return None, None
         time.sleep(POLL_INTERVAL)
 
@@ -309,9 +458,20 @@ def decorate(function, llm, overrides, version):
                 llm,
                 verifier or config.verifier_overrider,
             )
-        except Exception:
-            LOGGER.debug("Cache lookup unavailable", exc_info=True)
-            decision("miss", "unsupported_or_unavailable", config)
+        except Exception as exc:
+            LOGGER.debug(
+                "Cache lookup unavailable error=%s", type(exc).__name__
+            )
+            details = None
+            if llm and config.diagnostics:
+                try:
+                    details = MissDiagnostic(body, config).finish()
+                except Exception:
+                    details = {}
+                details["error"] = type(exc).__name__
+            decision(
+                "miss", "unsupported_or_unavailable", config, diagnostic=details
+            )
             return None, None
 
     @functools.wraps(function)
@@ -343,8 +503,10 @@ def decorate(function, llm, overrides, version):
             if ticket:
                 try:
                     ticket.save(adapters.pack(result))
-                except Exception:
-                    LOGGER.debug("Unsupported cache result", exc_info=True)
+                except Exception as exc:
+                    LOGGER.debug(
+                        "Unsupported cache result error=%s", type(exc).__name__
+                    )
             return result
         finally:
             if ticket:
@@ -446,10 +608,10 @@ def decorate(function, llm, overrides, version):
                                     )
                                     await asyncio.to_thread(ticket.save, packed)
                                     saved = True
-                                except Exception:
+                                except Exception as exc:
                                     LOGGER.debug(
-                                        "Stream could not be cached",
-                                        exc_info=True,
+                                        "Stream could not be cached error=%s",
+                                        type(exc).__name__,
                                     )
                         yield chunk
                 finally:
@@ -463,14 +625,17 @@ def decorate(function, llm, overrides, version):
             return result
         try:
             await asyncio.to_thread(ticket.save, adapters.pack(result))
-        except Exception:
+        except Exception as exc:
             ticket.release()
-            LOGGER.debug("Unsupported cache result", exc_info=True)
+            LOGGER.debug(
+                "Unsupported cache result error=%s", type(exc).__name__
+            )
         return result
 
     wrapper = async_ if inspect.iscoroutinefunction(function) else sync
     wrapper.__signature__ = signature
     wrapper.cache_stats = cache_stats
+    wrapper.cache_misses = cache_misses
     return wrapper
 
 

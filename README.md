@@ -21,7 +21,8 @@ def ask_llm(request):
 ```
 
 Return text or JSON data. Regular and async functions work. Inputs need at least
-100 words; matching calls reuse the answer and print the cache-hit percentage.
+100 words; matching calls reuse the answer. Logging and console reports are off
+by default.
 
 | Mode | What it does |
 | --- | --- |
@@ -86,7 +87,10 @@ Set options directly on either decorator:
 | `path` | Where to store the database. It contains your inputs and results. |
 | `refresh_start="1d"` | Start occasionally running the function again after one day. |
 | `refresh_force="7d"` | Always run it again once the saved result is seven days old. |
-| `report=False` | Hide cache statistics. Reporting is on by default. |
+| `report=True` | Opt in to cache count summaries on stderr (default: off). |
+| `diagnostics=True` | Keep miss statistics and up to 20 recent redacted examples in memory. |
+| `diagnostic_text=False` | Mask diagnostic text by default; `True` explicitly enables raw excerpts. |
+| `near_miss_threshold=0.90` | Similarity threshold for flagging a miss for investigation; never permits reuse. |
 | `namespace="my-app"` | Keep separate applications or users' caches apart. |
 | `version="2"` | Stop reusing old results when a hidden dependency changes. |
 | `min_words=100` | Minimum input length for the LLM decorator only. |
@@ -98,5 +102,44 @@ Age starts from when the result was generated; a cache hit does not reset it.
 Durations accept seconds or strings such as `"30m"`, `"12h"`, and `"7d"`.
 Call either function with `use_cache=False` to skip caching for that call.
 There is no automatic limit on total disk usage.
+
+## Miss examples and statistics
+
+Inspect the running process without enabling logging:
+
+```python
+from cached_response import cache_misses, cache_stats
+
+print(cache_stats())       # Hits, misses, reasons, prompt sizes and symbol counts
+print(cache_misses(3))     # Three most recent LLM misses, newest first
+```
+
+Examples identify the candidate key, similarity score, rejection checks, changed
+field paths, and masked before/after excerpts. A high score indicates textual
+overlap, not confidence that the answer is safe to reuse. Redaction keeps the
+first four and last four characters, masks interior letters and numbers with
+`*`, and preserves spaces, dashes, and other symbols. This also applies to
+verifier explanations and dynamic field names. Strings of eight characters or
+fewer remain visible because they have no interior between the preserved edges.
+
+For an optional file log:
+
+```python
+from cached_response import configure_logging
+
+configure_logging(path="cache_diagnostics.log")  # File only; no console output
+# configure_logging(console=True)               # Explicit console opt-in
+# configure_logging(enabled=False)              # Remove this helper's handlers
+```
+
+This configures only `cached_response` loggers. It never changes root handlers,
+root levels, or third-party loggers, and package records do not propagate to root.
+Stats and examples are process-local; file output is created only when enabled.
+Redaction applies to diagnostics; the cache database itself stores original
+inputs and responses for matching and replay.
+
+Run `python examples/minimal/miss_diagnostics.py` for a local demonstration with
+no model/API calls. See [captured demo output](docs/miss-diagnostics-output.json)
+and [diagnostic details and limitations](docs/reference.md#miss-diagnostics).
 
 [Runnable examples](examples/minimal/README.md) · [All settings](docs/reference.md)

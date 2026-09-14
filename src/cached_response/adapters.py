@@ -7,6 +7,7 @@ import json
 import logging
 import time
 
+from .diagnostics import prompt_stats
 from .normalize import digest
 
 DROP_HEADERS = {"content-length", "transfer-encoding", "connection"}
@@ -196,8 +197,7 @@ async def verify_http(function, args, kwargs, request, body, evidence):
             error,
             extra={
                 "cache_verification": {
-                    "request": judge_body,
-                    "response": result if isinstance(result, dict) else None,
+                    "prompt": prompt_stats(body),
                     "seconds": time.monotonic() - started,
                     "error": error,
                 }
