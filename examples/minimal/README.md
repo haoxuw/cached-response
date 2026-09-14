@@ -38,6 +38,9 @@ Run `python examples/minimal/input_pair.py` to learn a SAFE regex from a local
 fixture judge. Three requests make one upstream call and one review; the third
 request hits `learned_metadata`. No credentials or model calls are needed.
 
+Run `python examples/minimal/test_handles.py` for two fresh test IDs across two
+turns. Four requests make two model calls; each answer names the current task.
+It uses a local fixture and an explicit [test-ID contract](../../docs/test-id-aliases.md).
 
 
 `signature_counts.py` exercises persistent masked and NLTK signature counters.

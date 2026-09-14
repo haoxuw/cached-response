@@ -4,7 +4,10 @@
 
 Caching defaults to disabled. Conservative mode reuses exact inputs only.
 Testing/risky modes additionally review changes to caller-declared irrelevant
-metadata. All other changes miss, including UUIDs and dates that normalize alike.
+metadata. An explicit `test_aliases` callback can also translate approved random
+test handles before inference and restore them in responses. See the
+[test-ID adapter](test-id-aliases.md) for its contract and streaming limits.
+All remaining changes miss, including UUIDs and dates that merely normalize alike.
 `Rule` regexes and masked/NLTK signatures only retrieve and rank candidates.
 They never authorize reuse. See the [input relevance checklist](input-relevance.md).
 

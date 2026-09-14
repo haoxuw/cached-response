@@ -96,6 +96,10 @@ class Config:
     verifier_options: dict = field(default_factory=dict)
     verifier_version: str = "1"
     verifier_timeout: float = 10
+    test_aliases: Callable | None = field(
+        default=None, compare=False, repr=False
+    )
+    alias_version: str = "1"
 
     def __post_init__(self):
         if self.signature_matching and self.mode != "disabled":
@@ -134,6 +138,8 @@ class Config:
             raise ValueError("verifier_options must be a dictionary")
         if self.verifier_timeout <= 0:
             raise ValueError("Require verifier_timeout > 0")
+        if self.test_aliases is not None and not callable(self.test_aliases):
+            raise ValueError("test_aliases must be a callable test contract")
         for rule in self.metadata_rules:
             re.compile(rule.pattern)
             if not rule.paths or any(not p for p in rule.paths):

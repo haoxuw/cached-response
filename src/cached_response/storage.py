@@ -138,6 +138,26 @@ class Store:
             ).fetchone()
         return json.loads(row[0]) if row else None
 
+    def bind_aliases(self, key, mapping, expires):
+        """Keep caller-supplied test handles one-to-one across concurrent turns."""
+        with self.connect() as db:
+            db.execute("DELETE FROM reviews WHERE expires <= ?", (time.time(),))
+            row = db.execute(
+                "SELECT payload FROM reviews WHERE key=?", (key,)
+            ).fetchone()
+            previous = json.loads(row[0]) if row else {}
+            if any(
+                k in previous and previous[k] != v for k, v in mapping.items()
+            ):
+                raise ValueError("Test alias changed during a conversation")
+            merged = {**previous, **mapping}
+            if len(set(merged.values())) != len(merged) or len(merged) > 128:
+                raise ValueError(
+                    "Test aliases must remain one-to-one and bounded"
+                )
+            self.review(key, merged, expires)
+            return merged
+
     def count_signatures(self, scope, signatures, hit):
         now = time.time()
         with self.connect() as db:

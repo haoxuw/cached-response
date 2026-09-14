@@ -34,7 +34,7 @@ by default.
 ### Matching in three rules
 
 1. Reuse exact inputs only within the same caller, settings, policy, and freshness window.
-2. Find similar candidates, but reject every change outside explicitly declared irrelevant metadata.
+2. Rename explicitly approved test handles consistently; keep other facts, instructions, settings and references unchanged.
 3. Apply scoped SAFE or UNSAFE rules; ask the judge when uncertain, and save eligible decisions.
 
 Responses use exact input keys. Regexes recognize UUIDs, timestamps, and generated
@@ -52,6 +52,12 @@ rejects it. An unknown or conflicting rule asks the judge. If the judge is still
 **UNCERTAIN**, the original model runs and no rule is learned. Rules stay tied to
 the same caller, unchanged context, response and policy. See
 [how learning works](docs/learning-from-misses.md#learn-safe-and-unsafe-decisions).
+
+Repeated tests can opt into `test_aliases`: map fresh test IDs to stable handles
+before inference, then render current IDs in answers and tool calls. The adapter
+preserves thought signatures and restores original signed arguments across turns.
+This experimental feature buffers streams and requires an explicit test contract.
+Read [who this helps and how to configure it](docs/test-id-aliases.md).
 
 ```python
 @cached_llm_response(
@@ -153,6 +159,8 @@ Set options directly on either decorator:
 | `learning=False` | Turn off model verification for the LLM decorator. |
 | `metadata_paths=()` | Exact dotted string paths or wildcards declaring irrelevant metadata. |
 | `metadata_rules=()` | Reviewed regexes for irrelevant string fields; reuse without a review call. |
+| `test_aliases=None` | Opt-in callback for stable random handles in isolated tests; see the [guide](docs/test-id-aliases.md). |
+| `alias_version="1"` | Change when the test-handle contract changes; start fresh conversations. |
 | `verifier_version="1"` | Change this when your verifier policy or callback changes. |
 | `verifier_model=None` | Separate review model; `None` uses the original model. |
 | `verifier_timeout="10s"` | Maximum time spent waiting for each review. |

@@ -25,7 +25,13 @@ from .diagnostics import (
     cache_misses,
     remember,
 )
-from .normalize import Normalized, digest, dumps, normalize, word_count
+from .normalize import (
+    Normalized,
+    digest,
+    dumps,
+    normalize,
+    word_count,
+)
 from .storage import get_store
 
 LOGGER = logging.getLogger("cached_response")
@@ -510,17 +516,31 @@ def decorate(function, llm, overrides, version):
             )
             return None, None
 
+    def alias_session(body, extra, config):
+        return adapters.TestAliases(body, scope(extra), config)
+
     @functools.wraps(function)
     def sync(*args, **kwargs):
         kwargs, use_cache = arguments(kwargs)
         config = configuration()
-        if (llm and config.mode == "disabled") or not use_cache:
+        alias_enabled = (
+            llm and config.test_aliases and config.mode in ("testing", "risky")
+        )
+        if (llm and config.mode == "disabled") or (
+            not use_cache and not alias_enabled
+        ):
             return function(*args, **kwargs)
         try:
             body = adapters.function_input(function, args, kwargs)
         except Exception:
             decision("miss", "unsupported_input", config)
             return function(*args, **kwargs)
+        aliases = alias_session(body, None, config) if alias_enabled else None
+        if aliases and not aliases.mapping:
+            aliases = None
+        if aliases:
+            body = aliases.body
+            args, kwargs = adapters.replace_input(function, args, kwargs, body)
         verifier = config.verifier_overrider
         if (
             verifier is None
@@ -531,11 +551,21 @@ def decorate(function, llm, overrides, version):
             verifier = functools.partial(
                 adapters.verify_function, function, args, kwargs, body
             )
-        ticket, cached = ready(body, None, config, verifier)
+        ticket, cached = (
+            ready(body, None, config, verifier) if use_cache else (None, None)
+        )
         if cached is not None:
-            return adapters.unpack(cached)
+            return adapters.unpack(
+                aliases.output(cached) if aliases else cached
+            )
         try:
             result = function(*args, **kwargs)
+            if aliases:
+                packed = adapters.pack(result)
+                rendered = aliases.output(packed)
+                if ticket:
+                    ticket.save(packed)
+                return adapters.unpack(rendered)
             if ticket:
                 try:
                     ticket.save(adapters.pack(result))
@@ -552,7 +582,12 @@ def decorate(function, llm, overrides, version):
     async def async_(*args, **kwargs):
         kwargs, use_cache = arguments(kwargs)
         config = configuration()
-        if (llm and config.mode == "disabled") or not use_cache:
+        alias_enabled = (
+            llm and config.test_aliases and config.mode in ("testing", "risky")
+        )
+        if (llm and config.mode == "disabled") or (
+            not use_cache and not alias_enabled
+        ):
             return await function(*args, **kwargs)
         try:
             request = adapters.http_request(args, kwargs)
@@ -569,6 +604,17 @@ def decorate(function, llm, overrides, version):
         except Exception:
             decision("miss", "unsupported_input", config)
             return await function(*args, **kwargs)
+        aliases = (
+            await asyncio.to_thread(alias_session, body, extra, config)
+            if alias_enabled
+            else None
+        )
+        if aliases and not aliases.mapping:
+            aliases = None
+        if aliases:
+            body = aliases.body
+            args, kwargs = adapters.replace_input(function, args, kwargs, body)
+            request = adapters.http_request(args, kwargs)
         verifier = config.verifier_overrider
         if (
             llm
@@ -595,17 +641,71 @@ def decorate(function, llm, overrides, version):
                     if not pending.done():
                         pending.cancel()
 
-        ticket, cached = await async_lookup(
-            ready, body, extra, config, verifier
+        ticket, cached = (
+            await async_lookup(ready, body, extra, config, verifier)
+            if use_cache
+            else (None, None)
         )
         if cached is not None:
-            return adapters.unpack(cached)
+            rendered = (
+                await asyncio.to_thread(aliases.output, cached)
+                if aliases
+                else cached
+            )
+            return adapters.unpack(rendered)
         try:
             result = await function(*args, **kwargs)
         except BaseException:
             if ticket:
                 ticket.release()
             raise
+        if aliases and aliases.mapping:
+            if getattr(result, "status_code", 200) != 200:
+                if ticket:
+                    ticket.release()
+                return result
+            try:
+                if hasattr(result, "body_iterator"):
+                    if (
+                        "text/event-stream"
+                        not in result.headers.get("content-type", "")
+                        or "set-cookie" in result.headers
+                        or "content-encoding" in result.headers
+                    ):
+                        raise ValueError(
+                            "Unsupported test-alias response stream"
+                        )
+                    chunks, size, tail = [], 0, b""
+                    async for chunk in result.body_iterator:
+                        raw = (
+                            chunk.encode() if isinstance(chunk, str) else chunk
+                        )
+                        size += len(raw)
+                        if size > config.max_entry_bytes:
+                            raise ValueError(
+                                "Test-alias stream exceeds buffer limit"
+                            )
+                        chunks.append(raw)
+                        tail = (tail + raw)[-128:]
+                        if b"data: [DONE]\n\n" in tail.replace(b"\r\n", b"\n"):
+                            break
+                    packed = adapters.completed_sse(
+                        b"".join(chunks), result.headers
+                    )
+                else:
+                    packed = adapters.pack(result)
+                rendered = await asyncio.to_thread(aliases.output, packed)
+                if ticket:
+                    await asyncio.to_thread(ticket.save, packed)
+                return adapters.unpack(rendered)
+            finally:
+                if ticket:
+                    ticket.release()
+                close = getattr(
+                    getattr(result, "body_iterator", None), "aclose", None
+                )
+                if close:
+                    await close()
         if not ticket:
             return result
         if hasattr(result, "body_iterator"):
@@ -692,8 +792,9 @@ def cached_llm_response(
         version: Explicit cache version for changes to hidden dependencies.
         verifier_overrider: Optional replacement for built-in verification.
             Receives evidence including default instructions and returns a dict
-            with safe_to_reuse (bool), reason (str), and segments (all indexes), synchronously. By default,
-            supported chat wrappers use the package prompt and original function.
+            with decision (SAFE, UNSAFE or UNCERTAIN), reason (str), and segments
+            (all indexes), synchronously. Legacy safe_to_reuse is also accepted.
+            Supported chat wrappers use the package prompt and original function.
         **options: Config fields such as path, min_words, refresh_start, and
             refresh_force; namespace additionally separates caches.
 

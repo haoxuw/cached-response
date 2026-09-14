@@ -13,6 +13,9 @@ the snippets below use replacement names and IDs, not private captures.
 | A candidate exceeds the review model's input limit | The reviewer cannot see enough context. | Use a caller-reviewed metadata rule only after checking the full pair. |
 
 The last row is a tested size limit; it was not a model approval in the live run.
+For isolated tests where random IDs may be renamed consistently, see the
+[explicit multi-turn test ID rules](test-id-aliases.md). This requires a caller-configured test contract; metadata rules alone do not
+provide this exception.
 Earlier high-hit tests used model approval for fields such as process IDs and lock
 labels. Those approvals took time and did not prove the fields were always safe.
 
@@ -69,6 +72,10 @@ Inspect `cache_misses()` in the serving process for `learned_unsafe`,
 as `learned_metadata`. Decisions live in the configured SQLite database's
 `reviews` table. They store decisions and patterns, not the judge's explanation.
 See the [callback format](reference.md#verification) for details.
+
+This feature does not learn substitutions for system text, task IDs or thought
+signatures. Those need the separate [test ID adapter](test-id-aliases.md).
+A model's approval alone cannot make a signed response safe to rewrite.
 
 ## Let an agent investigate
 
