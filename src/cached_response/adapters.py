@@ -17,6 +17,18 @@ VERIFIER_MAX_TOKENS = 2048
 LOGGER = logging.getLogger("cached_response.verifier")
 
 
+class AliasContractUnsatisfied(ValueError):
+    """This request's test handles cannot be bound, so it must not be cached.
+
+    Distinct from an exception raised by the caller's own ``test_aliases``
+    callback: that is a programming error the package surfaces, while this
+    says the contract does not hold for this request -- a leftover signed
+    call from another process, a handle that already occurs in the input, a
+    mapping that stopped being one-to-one. The caller cannot fix those
+    per-request, so the only safe response is a live call.
+    """
+
+
 class TestAliases:
     """An explicit test contract, applied before lookup AND provider inference."""
 
@@ -34,7 +46,7 @@ class TestAliases:
             or not conversation
             or not isinstance(mapping, dict)
         ):
-            raise ValueError(
+            raise AliasContractUnsatisfied(
                 "Test aliases require a conversation key and ID mapping"
             )
         if not mapping or any(
@@ -43,9 +55,13 @@ class TestAliases:
             for pair in mapping.items()
             for v in pair
         ):
-            raise ValueError("Test aliases require explicit bounded opaque IDs")
+            raise AliasContractUnsatisfied(
+                "Test aliases require explicit bounded opaque IDs"
+            )
         if any(v in mapping and mapping[v] != v for v in mapping.values()):
-            raise ValueError("Test alias overlaps an application ID")
+            raise AliasContractUnsatisfied(
+                "Test alias overlaps an application ID"
+            )
         self.store = get_store(str(config.path))
         self.scope = digest(
             {"alias": 1, "caller": scope, "version": config.alias_version}
@@ -61,7 +77,9 @@ class TestAliases:
             if re.search(
                 r"(?<!\w)" + re.escape(target) + r"(?!\w)", dumps(body)
             ):
-                raise ValueError("Canonical test ID already occurs in input")
+                raise AliasContractUnsatisfied(
+                    "Canonical test ID already occurs in input"
+                )
         self.body = {
             **body,
             "messages": translate(
@@ -77,7 +95,7 @@ class TestAliases:
                     if self.function_value(
                         call["function"]
                     ) != self.function_value(original):
-                        raise ValueError(
+                        raise AliasContractUnsatisfied(
                             "Signed tool arguments differ from original response"
                         )
                     call["function"] = original
@@ -85,7 +103,7 @@ class TestAliases:
                     THOUGHT_SEPARATOR in call.get("id", "")
                     or any(k in PROTECTED for k in (*before, *call))
                 ):
-                    raise ValueError(
+                    raise AliasContractUnsatisfied(
                         "Original signed tool arguments are unavailable"
                     )
 
@@ -105,12 +123,12 @@ class TestAliases:
         if not self.mapping:
             return payload
         if payload["kind"] not in {"json", "http", "sse"}:
-            raise ValueError(
+            raise AliasContractUnsatisfied(
                 "Test aliases require text or JSON model responses"
             )
         rendered = translate(payload, {v: k for k, v in self.mapping.items()})
         if translate(rendered, self.mapping) != payload:
-            raise ValueError(
+            raise AliasContractUnsatisfied(
                 "Test aliases do not round-trip the provider response"
             )
         values = (
@@ -130,7 +148,9 @@ class TestAliases:
                         key = self.part_key(call)
                         old = self.store.review(key)
                         if old is not None and old != call["function"]:
-                            raise ValueError("Provider reused a signed call ID")
+                            raise AliasContractUnsatisfied(
+                                "Provider reused a signed call ID"
+                            )
                         self.store.review(key, call["function"], self.expires)
         return rendered
 
@@ -162,12 +182,16 @@ def replace_input(function, args, kwargs, body):
     bound.apply_defaults()
     names = [k for k in bound.arguments if k != "use_cache"]
     if len(names) != 1:
-        raise ValueError("Test aliases need one chat-request dictionary")
+        raise AliasContractUnsatisfied(
+            "Test aliases need one chat-request dictionary"
+        )
     value = bound.arguments[names[0]]
     if not isinstance(value, dict) or not isinstance(
         value.get("messages"), list
     ):
-        raise ValueError("Expected one chat-request dictionary with messages")
+        raise AliasContractUnsatisfied(
+            "Expected one chat-request dictionary with messages"
+        )
     bound.arguments[names[0]] = body
     return bound.args, bound.kwargs
 

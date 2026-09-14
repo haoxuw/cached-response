@@ -95,9 +95,14 @@ Console and file logging remain separate opt-ins. Disabling raw collection does
 not erase previously retained examples or files. Exception diagnostics contain error
 types only, with no exception messages or tracebacks.
 
-An invalid test-ID contract records `test_aliases_rejected` before raising the
-original error. Raw input opt-in covers this rejection too. The package still
-blocks inference: continuing with invalid IDs could break signed tool calls.
+A request for which the test-ID contract does not hold — a handle already in
+the input, signed history from outside this cache — records
+`test_aliases_rejected` and falls open to a live call with the original,
+untranslated request, cacheable only under that exact raw input; signed tool
+calls are never sent in a broken form. Raw input opt-in covers this rejection
+too. An exception raised by the
+caller's own `test_aliases` callback still propagates: that is a programming
+error worth surfacing, not a per-request contract failure.
 
 Candidate lookup considers at most eight recent indexed entries in the same
 function, namespace, mode, rules, and HTTP identity. Chat requests also require
