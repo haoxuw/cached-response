@@ -41,6 +41,25 @@ capture the later fresh response: collect that separately when comparing answers
 only within the authorized scope. No candidates can mean a cold or isolated cache.
 Do not mistake redacted excerpts or a truncated difference list for full context.
 
+For an already authorized debugging session, `configure()` can also change
+settings globally in the serving process:
+
+```python
+from cached_response import configure, configure_logging
+
+configure(diagnostic_raw_inputs=True, diagnostic_text=True)
+configure_logging(console=True)
+# Run test requests; inspect cache_misses() or the console.
+configure(diagnostic_raw_inputs=False, diagnostic_text=False)
+configure_logging(enabled=False)
+```
+
+`diagnostic_text` only unmasks excerpts. `diagnostic_raw_inputs` records complete
+caller and closest stored inputs; `lookup_input` shows any test-alias substitution.
+Oversized pairs have `raw_inputs_omitted` instead. Decorator options override global
+settings. Raw examples and enabled file logs remain after switching collection off.
+Use bounded `capture_misses()` above when a private file and automatic stop are useful.
+
 Existing authorization for this test counts; do not ask again. Without authorization
 to view raw traffic, keep `include_text=False` and request the missing scope before
 capturing it. This workflow does not authorize production capture or uploading

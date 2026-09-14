@@ -326,3 +326,95 @@ def test_invalid_threshold(threshold):
 )
 def test_redaction_preserves_edges_and_symbols(text, expected):
     assert redact(text) == expected
+
+
+def test_global_raw_inputs_toggle_existing_decorator(tmp_path, monkeypatch, capsys):
+    from cached_response import configure
+    from cached_response import config as configuration
+    monkeypatch.setattr(configuration, '_config', Config())
+
+    @cached_llm_response(path=tmp_path / 'raw.db', mode='testing', min_words=0, learning=False)
+    def ask(body):
+        return 'answer'
+
+    old = {'messages': [{'role': 'user', 'content': 'prefix ' * 40 + 'OLD middle' + ' suffix' * 40}]}
+    new = {'messages': [{'role': 'user', 'content': 'prefix ' * 40 + 'NEW middle' + ' suffix' * 40}]}
+    root = logging.getLogger()
+    root_state = (list(root.handlers), root.level)
+    ask(old)
+    assert 'raw_inputs' not in cache_misses(1)[0]
+    configure(diagnostic_raw_inputs=True)
+    ask(new)
+    raw = cache_misses(1)[0]['raw_inputs']
+    assert raw['caller_input'] == new
+    assert raw['candidate_input'] == old
+    assert capsys.readouterr().err == ''
+    configure_logging(console=True)
+    ask({'messages': [{'role': 'user', 'content': 'console ACTUAL middle input'}]})
+    assert 'console ACTUAL middle input' in capsys.readouterr().err
+    configure(diagnostic_raw_inputs=False)
+    ask('another request')
+    assert 'raw_inputs' not in cache_misses(1)[0]
+    assert (list(root.handlers), root.level) == root_state
+
+
+def test_raw_inputs_short_requests_and_explicit_size_omission(tmp_path):
+    @cached_llm_response(path=tmp_path / 'short.db', mode='testing',
+                         min_words=100, diagnostic_raw_inputs=True,
+                         max_entry_bytes=100)
+    def ask(body):
+        return 'answer'
+    ask('actual short input')
+    assert cache_misses(1)[0]['raw_inputs']['caller_input'] == 'actual short input'
+    ask('x' * 200)
+    event = cache_misses(1)[0]
+    assert 'raw_inputs' not in event
+    assert event['raw_inputs_omitted']['reason'] == 'max_entry_bytes'
+
+
+def test_raw_inputs_preserve_actual_caller_before_aliases(tmp_path):
+    import asyncio
+    @cached_llm_response(path=tmp_path / 'aliases.db', mode='testing', min_words=0,
+                         diagnostic_raw_inputs=True,
+                         test_aliases=lambda body: ('conversation', {'task_123456': 'task_000001'}))
+    async def ask(body):
+        return 'answer'
+    body = {'messages': [{'role': 'user', 'content': 'inspect task_123456'}]}
+    asyncio.run(ask(body))
+    raw = cache_misses(1)[0]['raw_inputs']
+    assert raw['caller_input'] == body
+    assert raw['lookup_input']['messages'][0]['content'] == 'inspect task_000001'
+    assert body['messages'][0]['content'] == 'inspect task_123456'
+
+
+@pytest.mark.parametrize('asynchronous', [False, True])
+@pytest.mark.parametrize('raw', [False, True])
+def test_rejected_alias_contract_is_diagnosed_without_inference(tmp_path, capsys, asynchronous, raw):
+    import asyncio
+    body = {'messages': [{'role': 'user', 'content': 'inspect private-task-context'}]}
+    calls = []
+    def contract(body):
+        raise ValueError('private callback explanation')
+    def upstream(body):
+        calls.append(body)
+    async def async_upstream(body):
+        calls.append(body)
+    ask = cached_llm_response(path=tmp_path/'cache.db', mode='testing',
+                              test_aliases=contract, diagnostic_raw_inputs=raw)(
+        async_upstream if asynchronous else upstream)
+    configure_logging(console=True)
+    with pytest.raises(ValueError, match='private callback explanation'):
+        asyncio.run(ask(body)) if asynchronous else ask(body)
+    event = cache_misses(1)[0]
+    assert event['reason'] == 'test_aliases_rejected'
+    assert event['error'] == 'ValueError'
+    assert not calls
+    assert cache_stats()['miss_reasons'] == {'test_aliases_rejected': 1}
+    log = capsys.readouterr().err
+    assert 'private callback explanation' not in log
+    if raw:
+        assert event['raw_inputs']['caller_input'] == body
+        assert 'private-task-context' in log
+    else:
+        assert 'raw_inputs' not in event
+        assert 'private-task-context' not in log

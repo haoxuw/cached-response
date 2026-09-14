@@ -80,6 +80,7 @@ class Config:
     signature_matching: bool = False
     structural_matching: bool = False
     diagnostic_text: bool = False
+    diagnostic_raw_inputs: bool = False
     near_miss_threshold: float = 0.90
     rules: tuple[Rule, ...] = ()
     validator: Callable | None = field(default=None, compare=False, repr=False)

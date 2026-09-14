@@ -80,8 +80,24 @@ cover the whole string. Unknown field names and verifier explanations use the
 same redaction; long values are capped at 160 characters while retaining their
 last four characters. Explicit `diagnostic_text=True` on the decorator or `configure()`
 allows raw excerpts and verifier explanations in new examples and logs. It does
-not retroactively change retained examples. Exception diagnostics contain error
+not retroactively change retained examples. `diagnostic_raw_inputs=True` adds
+complete `raw_inputs` to new miss events and `cache_misses()`: `caller_input`,
+plus the closest `candidate_input` and its `candidate_key` when available. The
+candidate is the stored lookup input. If test aliases changed the current input,
+`lookup_input` is included separately. No cached response is added. The combined
+raw fields must fit `max_entry_bytes`; otherwise `raw_inputs_omitted` reports the
+size and limit without truncating or retaining those fields. Short-input misses
+are included too. `diagnostics=False` disables this collection.
+
+Both switches work through global `configure()` or decorator options. Existing
+decorators read global settings on each call; explicit decorator options win.
+Console and file logging remain separate opt-ins. Disabling raw collection does
+not erase previously retained examples or files. Exception diagnostics contain error
 types only, with no exception messages or tracebacks.
+
+An invalid test-ID contract records `test_aliases_rejected` before raising the
+original error. Raw input opt-in covers this rejection too. The package still
+blocks inference: continuing with invalid IDs could break signed tool calls.
 
 Candidate lookup considers at most eight recent indexed entries in the same
 function, namespace, mode, rules, and HTTP identity. Chat requests also require

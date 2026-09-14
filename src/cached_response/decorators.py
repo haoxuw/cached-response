@@ -197,10 +197,10 @@ class Ticket:
             self.release()
 
 
-def prepare(body, scope, config, llm, verifier=None):
+def prepare(body, scope, config, llm, verifier=None, original_input=None):
     """Returns (ticket, cached envelope). A None ticket means bypass."""
     diagnostic = (
-        MissDiagnostic(body, config)
+        MissDiagnostic(body, config, original_input)
         if llm and (config.diagnostics or config.diagnostic_capture)
         else None
     )
@@ -491,7 +491,7 @@ def decorate(function, llm, overrides, version):
         settings, **{k: v for k, v in overrides.items() if k != "namespace"}
     )
 
-    def ready(body, extra, config, verifier=None):
+    def ready(body, extra, config, verifier=None, original_input=None):
         try:
             return prepare(
                 body,
@@ -499,6 +499,7 @@ def decorate(function, llm, overrides, version):
                 config,
                 llm,
                 verifier or config.verifier_overrider,
+                original_input,
             )
         except Exception as exc:
             LOGGER.debug(
@@ -507,7 +508,9 @@ def decorate(function, llm, overrides, version):
             details = None
             if llm and config.diagnostics:
                 try:
-                    details = MissDiagnostic(body, config).finish()
+                    details = MissDiagnostic(
+                        body, config, original_input
+                    ).finish()
                 except Exception:
                     details = {}
                 details["error"] = type(exc).__name__
@@ -517,7 +520,20 @@ def decorate(function, llm, overrides, version):
             return None, None
 
     def alias_session(body, extra, config):
-        return adapters.TestAliases(body, scope(extra), config)
+        try:
+            return adapters.TestAliases(body, scope(extra), config)
+        except Exception as exc:
+            details = None
+            if config.diagnostics:
+                details = {"error": type(exc).__name__}
+                try:
+                    details.update(MissDiagnostic(body, config).finish())
+                except Exception:
+                    pass
+            decision(
+                "miss", "test_aliases_rejected", config, diagnostic=details
+            )
+            raise
 
     @functools.wraps(function)
     def sync(*args, **kwargs):
@@ -535,6 +551,7 @@ def decorate(function, llm, overrides, version):
         except Exception:
             decision("miss", "unsupported_input", config)
             return function(*args, **kwargs)
+        original_input = body
         aliases = alias_session(body, None, config) if alias_enabled else None
         if aliases and not aliases.mapping:
             aliases = None
@@ -552,7 +569,9 @@ def decorate(function, llm, overrides, version):
                 adapters.verify_function, function, args, kwargs, body
             )
         ticket, cached = (
-            ready(body, None, config, verifier) if use_cache else (None, None)
+            ready(body, None, config, verifier, original_input)
+            if use_cache
+            else (None, None)
         )
         if cached is not None:
             return adapters.unpack(
@@ -604,6 +623,7 @@ def decorate(function, llm, overrides, version):
         except Exception:
             decision("miss", "unsupported_input", config)
             return await function(*args, **kwargs)
+        original_input = body
         aliases = (
             await asyncio.to_thread(alias_session, body, extra, config)
             if alias_enabled
@@ -642,7 +662,9 @@ def decorate(function, llm, overrides, version):
                         pending.cancel()
 
         ticket, cached = (
-            await async_lookup(ready, body, extra, config, verifier)
+            await async_lookup(
+                ready, body, extra, config, verifier, original_input
+            )
             if use_cache
             else (None, None)
         )
