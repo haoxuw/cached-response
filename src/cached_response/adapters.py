@@ -87,6 +87,16 @@ class TestAliases:
                 json.loads(dumps(body["messages"])), self.mapping
             ),
         }
+        # Two views of the same turn, and the difference only ever concerns
+        # signed tool calls. ``body`` is what the provider must receive: the
+        # exact argument bytes it signed. ``lookup_body`` is what the cache
+        # keys on: the translated form, where declared test handles are
+        # canonical everywhere, including inside those arguments. Keying on
+        # the provider's bytes instead would put one run's raw ids in the
+        # key, so no two runs of the same conversation could ever agree --
+        # the same reason ``signed_call_handles`` keys the call *id* on a
+        # positional handle while forwarding the real token.
+        self.lookup_body = self.body
         for before, after in zip(body["messages"], self.body["messages"]):
             for old_call, call in zip(
                 before.get("tool_calls") or [], after.get("tool_calls") or []
@@ -95,7 +105,7 @@ class TestAliases:
                 if original is not None and self.function_value(
                     call["function"]
                 ) == self.function_value(original):
-                    call["function"] = original
+                    replacement = original
                 elif call != old_call and (
                     THOUGHT_SEPARATOR in call.get("id", "")
                     or any(k in PROTECTED for k in (*before, *call))
@@ -105,9 +115,18 @@ class TestAliases:
                     # matches. The client echoed the provider's signed
                     # bytes, so forward those exact bytes; translating
                     # them would break the provider's signature check,
-                    # and raising poisons every later turn. This call
-                    # keys on its raw IDs, so its turns simply miss.
-                    call["function"] = old_call["function"]
+                    # and raising poisons every later turn.
+                    replacement = old_call["function"]
+                else:
+                    continue
+                if self.lookup_body is self.body:
+                    # Branch the lookup view off the translated form before
+                    # the first provider-exact substitution lands on it.
+                    self.lookup_body = {
+                        **body,
+                        "messages": json.loads(dumps(self.body["messages"])),
+                    }
+                call["function"] = replacement
 
     def part_key(self, call):
         return digest({"alias_part": self.scope, "id": call.get("id")})

@@ -164,3 +164,86 @@ def test_rejection_reasons_become_misses_not_errors(tmp_path):
     ask(conversation())
     after = cache_stats()
     assert after['requests'] == before + 1
+
+
+def wrap_signed(tmp_path, upstream):
+    """The proxy's configuration: aliases plus signed-call handle keying."""
+    return cached_llm_response(mode='testing', min_words=0, path=tmp_path/'cache.db',
+                               test_aliases=aliases, signed_call_handles=True)(upstream)
+
+
+def signed_history(task, call_id):
+    """A turn echoing a signed tool call whose arguments name the task."""
+    return {'model': 'test', 'stream': False, 'messages': [
+        {'role': 'user', 'content': f'Report the status of {task}.'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [
+            {'id': call_id, 'type': 'function',
+             'function': {'name': 'kanban_show',
+                          'arguments': json.dumps({'task_id': task})}}]},
+        {'role': 'tool', 'tool_call_id': call_id, 'name': 'kanban_show',
+         'content': json.dumps({'task': {'id': task, 'status': 'running'}})},
+        {'role': 'user', 'content': 'Summarize the status.'},
+    ]}
+
+
+def test_two_runs_share_a_hit_despite_fresh_ids_and_fresh_signatures(tmp_path):
+    """The cross-run case: nothing is carried over but the cache itself.
+
+    Two runs of one conversation mint their own task id AND receive their own
+    thought signature, so neither the ids nor the signed tokens repeat and
+    neither run recorded the other's signed call. The key is the translated
+    form, so they still agree; the provider still receives each run's own
+    signed bytes.
+    """
+    sent = []
+
+    def upstream(body):
+        sent.append(copy.deepcopy(body))
+        return {'answer': 'ok'}
+
+    ask = wrap_signed(tmp_path, upstream)
+    first = signed_history(TASK, SIGNED)
+    second = signed_history(OTHER, 'call_999999__thought__adifferentsignature')
+    assert ask(copy.deepcopy(first)) == {'answer': 'ok'}
+    assert ask(copy.deepcopy(second)) == {'answer': 'ok'}
+    assert len(sent) == 1, 'the second run should have replayed the first'
+    # The provider saw run 1's exact signed bytes, not a translated form.
+    forwarded = sent[0]['messages'][1]['tool_calls'][0]
+    assert forwarded['id'] == SIGNED
+    assert json.loads(forwarded['function']['arguments'])['task_id'] == TASK
+
+
+def test_the_provider_still_receives_its_own_signed_bytes_on_a_miss(tmp_path):
+    """Keying on the translated form must not change what is sent."""
+    sent = []
+
+    def upstream(body):
+        sent.append(copy.deepcopy(body))
+        return {'answer': 'ok'}
+
+    ask = wrap_signed(tmp_path, upstream)
+    body = signed_history(TASK, SIGNED)
+    ask(copy.deepcopy(body))
+    call = sent[0]['messages'][1]['tool_calls'][0]
+    assert call['function']['arguments'] == json.dumps({'task_id': TASK})
+    assert 'test_id_' not in call['function']['arguments']
+    # Everything outside the signed call is still translated for the model.
+    assert 'test_id_00000000' in sent[0]['messages'][0]['content']
+
+
+def test_a_changed_signed_argument_still_misses(tmp_path):
+    """Canonicalizing declared handles must not blur a real argument change."""
+    sent = []
+
+    def upstream(body):
+        sent.append(copy.deepcopy(body))
+        return {'answer': 'ok'}
+
+    ask = wrap_signed(tmp_path, upstream)
+    first = signed_history(TASK, SIGNED)
+    second = signed_history(OTHER, 'call_999999__thought__adifferentsignature')
+    second['messages'][1]['tool_calls'][0]['function']['arguments'] = json.dumps(
+        {'task_id': OTHER, 'include_events': True})
+    ask(copy.deepcopy(first))
+    ask(copy.deepcopy(second))
+    assert len(sent) == 2
