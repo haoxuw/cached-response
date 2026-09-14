@@ -144,6 +144,33 @@ def test_canonical_collision_rejected(tmp_path):
     with pytest.raises(ValueError,match='already occurs'):AliasSession(body,'caller',config)
 
 
+@pytest.mark.parametrize('asynchronous', [False, True])
+def test_contract_failure_fails_open_to_an_untranslated_live_call(tmp_path, asynchronous):
+    from cached_response import cache_stats
+    calls=[]
+    def upstream(body):
+        calls.append(copy.deepcopy(body))
+        return {'answer':'live'}
+    async def async_upstream(body):
+        return upstream(body)
+    ask=cached_llm_response(mode='testing',min_words=0,path=tmp_path/'cache.db',
+                            test_aliases=lambda b:('session',{OLD:CANON}))(
+        async_upstream if asynchronous else upstream)
+    body=request();body['messages'][1]['content'] += ' and '+CANON
+    rejected=cache_stats()['miss_reasons'].get('test_aliases_rejected',0)
+    response=asyncio.run(ask(body)) if asynchronous else ask(body)
+    assert response=={'answer':'live'}
+    assert calls==[body]
+    assert cache_stats()['miss_reasons']['test_aliases_rejected']==rejected+1
+
+
+def test_callback_programming_errors_still_propagate(tmp_path):
+    @cached_llm_response(mode='testing',min_words=0,path=tmp_path/'cache.db',
+                         test_aliases=lambda b:(_ for _ in ()).throw(RuntimeError('caller bug')))
+    def ask(body):return {'answer':'live'}
+    with pytest.raises(RuntimeError,match='caller bug'):ask(request())
+
+
 def test_callback_cannot_mutate_original(tmp_path):
     body=request();snapshot=copy.deepcopy(body)
     def callback(copy):

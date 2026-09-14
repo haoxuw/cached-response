@@ -539,6 +539,14 @@ def decorate(function, llm, overrides, version):
             decision(
                 "miss", "test_aliases_rejected", config, diagnostic=details
             )
+            if isinstance(exc, adapters.AliasContractUnsatisfied):
+                # Fail open, like every other lookup failure: this request
+                # cannot be cached, which means a live call. Raising here
+                # reaches an HTTP integration as a 500 at its inference
+                # endpoint -- 741 of them in one measured CI run, crashing
+                # the agent workers behind it. A caller's own callback
+                # raising still propagates: that is a bug worth surfacing.
+                return None
             raise
 
     @functools.wraps(function)
