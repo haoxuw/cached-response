@@ -594,15 +594,22 @@ def decorate(function, llm, overrides, version):
             else (None, None)
         )
         if cached is not None:
-            return adapters.unpack(
-                aliases.output(cached) if aliases else cached
-            )
+            try:
+                return adapters.unpack(
+                    aliases.output(cached) if aliases else cached
+                )
+            except adapters.AliasContractUnsatisfied as exc:
+                # The entry cannot be rendered for this conversation;
+                # fall through to a live call.
+                LOGGER.debug(
+                    "Cached alias render failed error=%s", type(exc).__name__
+                )
         try:
             result = function(*args, **kwargs)
             if aliases:
                 packed = adapters.pack(result)
-                rendered = aliases.output(packed)
-                if ticket:
+                rendered = aliases.output(packed, live=True)
+                if ticket and aliases.cacheable:
                     ticket.save(packed)
                 return adapters.unpack(rendered)
             if ticket:
@@ -695,12 +702,19 @@ def decorate(function, llm, overrides, version):
             else (None, None)
         )
         if cached is not None:
-            rendered = (
-                await asyncio.to_thread(aliases.output, cached)
-                if aliases
-                else cached
-            )
-            return adapters.unpack(rendered)
+            try:
+                rendered = (
+                    await asyncio.to_thread(aliases.output, cached)
+                    if aliases
+                    else cached
+                )
+                return adapters.unpack(rendered)
+            except adapters.AliasContractUnsatisfied as exc:
+                # The entry cannot be rendered for this conversation;
+                # fall through to a live call.
+                LOGGER.debug(
+                    "Cached alias render failed error=%s", type(exc).__name__
+                )
         try:
             result = await function(*args, **kwargs)
         except BaseException:
@@ -742,8 +756,8 @@ def decorate(function, llm, overrides, version):
                     )
                 else:
                     packed = adapters.pack(result)
-                rendered = await asyncio.to_thread(aliases.output, packed)
-                if ticket:
+                rendered = await asyncio.to_thread(aliases.output, packed, True)
+                if ticket and aliases.cacheable:
                     await asyncio.to_thread(ticket.save, packed)
                 return adapters.unpack(rendered)
             finally:

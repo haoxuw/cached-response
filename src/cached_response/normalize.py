@@ -435,7 +435,11 @@ def translate(value, mapping):
         if not spans:
             return item
         if THOUGHT_SEPARATOR in item:
-            raise ValueError("Cannot translate a signed provider token")
+            # Signature bytes can coincidentally contain an ID-shaped
+            # substring; rewriting any part of a signed token corrupts it,
+            # so leave the whole string alone. The skip is symmetric, so
+            # rendering and its round-trip check treat it the same way.
+            return item
         try:
             nested = json.loads(item)
         except ValueError:
