@@ -1,9 +1,14 @@
 """Observational miss diagnostics; similarity never authorizes cache reuse."""
 
+import json
+import os
 import time
 import unicodedata
 from collections import Counter, deque
+from contextlib import contextmanager
 from copy import deepcopy
+from functools import lru_cache
+from pathlib import Path
 from threading import Lock
 
 from .normalize import dumps, normalize, strings
@@ -34,12 +39,17 @@ _examples = deque(maxlen=20)
 _examples_lock = Lock()
 
 
-def redact(text):
+def redact(text, *, offset=0, total=None):
     """Keep four edge characters and symbols; mask interior letters/numbers.
 
     Output is capped at 160 characters while retaining the original suffix.
     Strings of eight characters or fewer have no interior to mask.
     """
+    if total is not None:
+        return "".join(
+            "*" if 4 <= offset + index < total - 4 and char.isalnum() else char
+            for index, char in enumerate(text)
+        )
     if len(text) > 160:
         text = text[:156] + text[-4:]
     return "".join(
@@ -71,13 +81,18 @@ def prompt_stats(body):
         body = [message.get("content") for message in body["messages"]]
     result = dict(chars=0, bytes=0, words=0, symbols=0, digits=0, lines=0)
     for text in strings(body):
+        counts = Counter(text)
         result["chars"] += len(text)
         result["bytes"] += len(text.encode())
         result["words"] += len(text.split())
         result["symbols"] += sum(
-            unicodedata.category(char)[0] in "PS" for char in text
+            count
+            for char, count in counts.items()
+            if unicodedata.category(char)[0] in "PS"
         )
-        result["digits"] += sum(char.isdigit() for char in text)
+        result["digits"] += sum(
+            count for char, count in counts.items() if char.isdigit()
+        )
         result["lines"] += len(text.splitlines())
     return result
 
@@ -107,6 +122,91 @@ def similarity(left, right):
     overlap = sum((a & b).values())
     score = 2 * overlap / (sum(a.values()) + sum(b.values()))
     return score * min(a_length, b_length) / max(a_length, b_length)
+
+
+@lru_cache(maxsize=32)
+def _candidate_summary(text, mode, rules):
+    body = json.loads(text)
+    return signature(normalize(body, mode, rules).body), prompt_stats(body)
+
+
+@contextmanager
+def capture_misses(
+    path, *, include_text=False, limit=10, seconds=300, max_bytes=8_000_000
+):
+    """Temporarily capture misses in this process to a new private JSONL file.
+
+    Raw full pairs require include_text=True. Limits bound records, duration and
+    file bytes; oversized records are skipped, never silently truncated. Install
+    this in the process serving calls, with caching enabled. Defaults stay silent.
+    """
+    from . import config
+
+    if min(limit, seconds, max_bytes) <= 0:
+        raise ValueError("Capture limits must be positive")
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    status = {"written": 0, "skipped": 0, "bytes": 0}
+    lock, deadline = Lock(), time.monotonic() + seconds
+    fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+
+        def capture(diagnostic, details):
+            with lock:
+                if (
+                    output.closed
+                    or status["written"] >= limit
+                    or time.monotonic() >= deadline
+                ):
+                    return
+                event = {
+                    "event": "cache_miss",
+                    "redacted": not include_text,
+                    "prompt": details.get("prompt"),
+                    "candidates": [],
+                }
+                for item in details.get("candidates", [])[:1]:
+                    payload = diagnostic.candidates[item["key"]]["payload"]
+                    changes, truncated = differences(
+                        payload["input"], diagnostic.body, include_text
+                    )
+                    event["candidates"].append(
+                        {
+                            "key": item["key"],
+                            "reason": item["reason"],
+                            "differences": changes,
+                            "differences_truncated": truncated,
+                            **(
+                                {
+                                    "input": payload["input"],
+                                    "response": payload["result"],
+                                }
+                                if include_text
+                                else {}
+                            ),
+                        }
+                    )
+                if include_text:
+                    event["input"] = diagnostic.body
+                line = dumps(event) + "\n"
+                size = len(line.encode())
+                if status["bytes"] + size > max_bytes:
+                    status["skipped"] += 1
+                    return
+                output.write(line)
+                output.flush()
+                status["written"] += 1
+                status["bytes"] += size
+
+        previous = config.settings().diagnostic_capture
+        config.configure(diagnostic_capture=capture)
+        try:
+            yield status
+        finally:
+            if config.settings().diagnostic_capture is capture:
+                config.configure(diagnostic_capture=previous)
+            with lock:
+                output.close()
 
 
 def differences(before, after, include_text=False):
@@ -165,19 +265,26 @@ def differences(before, after, include_text=False):
             "before_chars": len(left),
             "after_chars": len(right),
         }
-        start = 0
-        while (
-            start < min(len(left), len(right)) and left[start] == right[start]
-        ):
-            start += 1
+        # String comparisons run in C; avoid a Python loop over long boilerplate.
+        start, end = 0, min(len(left), len(right))
+        while start < end:
+            middle = (start + end + 1) // 2
+            if left[:middle] == right[:middle]:
+                start = middle
+            else:
+                end = middle - 1
         start = max(0, start - 30)
         left_excerpt, right_excerpt = (
             left[start : start + 160],
             right[start : start + 160],
         )
         change.update(
-            before=left_excerpt if include_text else redact(left_excerpt),
-            after=right_excerpt if include_text else redact(right_excerpt),
+            before=left_excerpt
+            if include_text
+            else redact(left_excerpt, offset=start, total=len(left)),
+            after=right_excerpt
+            if include_text
+            else redact(right_excerpt, offset=start, total=len(right)),
             offset=start,
             redacted=not include_text,
         )
@@ -192,7 +299,6 @@ class MissDiagnostic:
         self.body = body
         self.config = config
         self.candidates = {}
-        self.learned = ()
 
     def observe(self, key, created, payload):
         self.candidates[key] = {
@@ -216,11 +322,32 @@ class MissDiagnostic:
                 scope, MAX_CANDIDATES
             ):
                 self.observe(key, created, payload)
+
+                def roles(value):
+                    if not isinstance(value, dict):
+                        return None
+                    messages = value.get("messages")
+                    if not isinstance(messages, list) or not all(
+                        isinstance(message, dict) for message in messages
+                    ):
+                        return None
+                    return [message.get("role") for message in messages]
+
+                old_roles = roles(payload.get("input"))
+                new_roles = roles(self.body)
+                if old_roles != new_roles:
+                    self.reject(
+                        key,
+                        "message_role_sequence_changed",
+                        previous_message_count=len(old_roles),
+                        current_message_count=len(new_roles),
+                    )
+                    continue
                 self.reject(
                     key,
                     "verification_disabled"
                     if (
-                        self.config.mode != "testing"
+                        self.config.mode not in ("testing", "risky")
                         or not self.config.learning
                     )
                     else "verification_unavailable",
@@ -238,13 +365,20 @@ class MissDiagnostic:
                 "reason": checks[-1]["reason"] if checks else reason,
                 "checks": checks,
                 "checks_truncated": candidate.get("checks_truncated", False),
+                **candidate.get("retrieval", {}),
             }
             try:
                 old = candidate["payload"]["input"]
-                previous = normalize(
-                    old, self.config.mode, self.config.rules, self.learned
+                text = dumps(old)
+                # Retain at most 32 strings of 262,144 characters.
+                summarize = (
+                    _candidate_summary
+                    if len(text) <= 262_144
+                    else _candidate_summary.__wrapped__
                 )
-                old_signature = signature(previous.body)
+                old_signature, stats = summarize(
+                    text, self.config.mode, tuple(self.config.rules)
+                )
                 score = similarity(current_signature, old_signature)
                 changes, truncated = differences(
                     old, self.body, self.config.diagnostic_text
@@ -256,7 +390,7 @@ class MissDiagnostic:
                     )
                     > MAX_SIGNATURE_CHARS,
                     high_similarity=score >= self.config.near_miss_threshold,
-                    prompt=prompt_stats(old),
+                    prompt=stats,
                     differences=changes,
                     differences_truncated=truncated,
                 )
@@ -269,6 +403,16 @@ class MissDiagnostic:
         result["near_miss"] = any(
             item.get("high_similarity", False) for item in result["candidates"]
         )
-        result["candidate_limit"] = MAX_CANDIDATES
+        result["candidate_limit"] = MAX_CANDIDATES * (
+            (3 if self.config.signature_matching else 1)
+            + bool(self.config.metadata_paths or self.config.metadata_rules)
+        )
         result["near_miss_threshold"] = self.config.near_miss_threshold
+        if result["near_miss"]:
+            result["next_step"] = {
+                "skill": "configure-cached-response",
+                "read": "cached-response --skill",
+                "capture": "capture_misses(path, include_text=True, limit=10)",
+                "requires": "authorized test traffic in the serving process",
+            }
         return result

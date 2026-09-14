@@ -14,10 +14,13 @@ def request(day):
             {
                 "role": "system",
                 "content": "Use the supplied context to inspect current state. "
-                * 15
-                + f"\nConversation started: September {day}, 2026\n",
+                * 15,
             },
             {"role": "user", "content": "Inspect alice@example.com's task."},
+            {
+                "role": "tool",
+                "content": f"Conversation started: September {day}, 2026",
+            },
         ],
     }
 
@@ -26,9 +29,11 @@ with TemporaryDirectory(prefix="cached-response-demo-") as directory:
 
     @cached_llm_response(
         mode="testing",
+        metadata_paths=("messages.*.content",),
         path=Path(directory) / "cache.db",
         verifier_overrider=lambda _: {
             "safe_to_reuse": False,
+            "segments": [0],
             "reason": "alice@example.com's task needs current state",
         },
     )

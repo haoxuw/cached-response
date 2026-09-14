@@ -12,8 +12,9 @@ There are three separate questions:
 3. Does the provider need it to continue or validate the conversation?
 
 A value can matter for any one of these reasons. Looking random does not answer
-any of them. These are design recommendations, not a claim that the current
-experimental normalizer can establish semantic equivalence.
+any of them. The implementation keeps undeclared changes exact and uses normalization only
+for retrieval. Declared metadata still needs guarded review; model approval
+cannot establish general semantic equivalence.
 
 ## Usually valuable: keep exact by default
 

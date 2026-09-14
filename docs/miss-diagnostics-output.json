@@ -14,16 +14,16 @@
     "miss_prompt": {
       "count": 2,
       "chars": {
-        "total": 1680,
-        "min": 840,
-        "max": 840,
-        "mean": 840.0
+        "total": 1676,
+        "min": 838,
+        "max": 838,
+        "mean": 838.0
       },
       "bytes": {
-        "total": 1680,
-        "min": 840,
-        "max": 840,
-        "mean": 840.0
+        "total": 1676,
+        "min": 838,
+        "max": 838,
+        "mean": 838.0
       },
       "words": {
         "total": 256,
@@ -53,23 +53,23 @@
   },
   "miss_example": {
     "reason": "cold",
-    "candidate_key": "f6e7238c02a70d84259e7aa28e4933f7e92298bfa00fd7d8b4131b8b8947fb3a",
-    "signature_similarity": 0.9968,
+    "candidate_key": "5d9dd978781ac842b2781529dbfa5056e849a2e21e6804534d2452a36ea30baa",
+    "signature_similarity": 0.9969,
     "high_similarity": true,
     "candidate_reason": "verifier_rejected",
     "differences": [
       {
         "path": [
           "messages",
-          0,
+          2,
           "content"
         ],
         "kind": "changed",
-        "before_chars": 807,
-        "after_chars": 807,
-        "before": "vers***** *******: ********* **, *026\n",
-        "after": "vers***** *******: ********* **, *026\n",
-        "offset": 769,
+        "before_chars": 40,
+        "after_chars": 40,
+        "before": "v******** *******: ********* **, 2026",
+        "after": "v******** *******: ********* **, 2026",
+        "offset": 3,
         "redacted": true
       }
     ]

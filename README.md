@@ -27,30 +27,86 @@ by default.
 | Mode | What it does |
 | --- | --- |
 | `disabled` (default) | Always calls your function. Keep this in production. |
-| `conservative` | Matches some changing UUIDs, timestamps, and generated IDs. |
-| `testing` | Matches more ID formats and supports LLM-approved matching rules. |
-| `risky` | Also learns patterns from rare generated-looking words. |
+| `conservative` | Exact input matches only. |
+| `testing` | Exact matches, optional test-ID aliases, and guarded metadata review. |
+| `risky` | Same safeguards as `testing`; retained for compatibility. |
 
-### Learning and optional override
+### Matching in three rules
 
-Testing mode includes a verification prompt. For a function taking one chat-request
-dictionary with `messages`, the package uses your existing model function to
-check whether a proposed matching rule is safe. Supported HTTP handlers work too.
-Approved rules are saved; later matches need no extra judge call. No prompt or
-hook is required. Unusable replies fall back to a fresh answer.
+1. Reuse exact inputs only within the same caller, settings, policy, and freshness window.
+2. Find similar candidates, but reject every change outside explicitly declared irrelevant metadata.
+3. Apply scoped SAFE or UNSAFE rules; ask the judge when uncertain, and save eligible decisions.
 
-To replace the built-in check, optionally use:
+Responses use exact input keys. Regexes recognize UUIDs, timestamps, and generated
+IDs for candidate search only. Optional masked and NLTK word signatures find more
+candidates; neither similarity nor a random-looking ID permits a hit.
+
+For broader matching, declare specific string fields whose values cannot change
+the answer or action. Only tool content and top-level `metadata` are eligible.
+Instructions, resource targets, facts, types, message order and provider state
+stay exact. Changed metadata referenced elsewhere or in the response causes a miss.
+Resource IDs are never interchangeable merely because they share a format.
+
+The judge can teach a bounded regex: **SAFE** reuses that candidate; **UNSAFE**
+rejects it. An unknown or conflicting rule asks the judge. If the judge is still
+**UNCERTAIN**, the original model runs and no rule is learned. Rules stay tied to
+the same caller, unchanged context, response and policy. See
+[how learning works](docs/learning-from-misses.md#learn-safe-and-unsafe-decisions).
 
 ```python
-@cached_llm_response(mode="testing", verifier_overrider=my_verifier)
+@cached_llm_response(
+    mode="testing",
+    metadata_paths=("messages.*.content.diagnostic_trace",),
+    verifier_model="your-fast-model",     # A model your existing connection supports
+    verifier_options={"reasoning_effort": "none"},  # Provider-specific; optional
+    verifier_timeout="10s",
+    verifier_version="1",
+)
+def ask_llm(request):
+    return your_model_call(request)
 ```
 
-Your override receives the evidence and default instructions. Return a dictionary
-with `safe_to_reuse` (true or false) and `reason` (text). You can change the prompt
-or use another model inside it. [Override example](docs/reference.md#optional-configuration).
+Already checked that a field is irrelevant? Skip the review call with an explicit
+rule. Both complete values must match; the same safety checks still apply:
 
-Matching can be wrong, and old answers can be stale—such as yesterday's weather.
-Learning also costs model calls. A replay does not test the model again.
+```python
+from cached_response import Rule, configure
+
+configure(mode="testing", metadata_rules=(
+    Rule.preset("uuid", paths=("messages.*.content.diagnostic_trace",)),
+))
+```
+
+Presets recognize `uuid`, `iso_time`, `hex_id`, and `digits` string formats. Use
+`Rule(name, pattern, paths)` for a custom regex. A format does not prove a field
+is irrelevant: never declare a target, deadline or fact just to get more hits.
+Metadata indexing finds matching contexts even after unrelated entries arrive.
+
+The verifier sees numbered changed fields, both full inputs, and the cached
+response. It must review every change. Saved approvals cover the exact pair,
+response and policy; they expire with the original response. Optional learned
+regexes cover only declared metadata under identical surrounding context.
+Generated regexes are restricted to bounded character classes, never arbitrary
+expressions. `learning=False` disables model review; caller-reviewed
+`metadata_rules` still work. Both metadata settings default to empty, so changed
+inputs miss unless you explicitly declare metadata.
+
+The built-in verifier uses your original connection with a separate model when
+configured. It removes inherited thinking settings and tools. Configure reasoning
+options for your provider; absence of a thinking setting does not guarantee zero
+reasoning. A synchronous `verifier_overrider` can replace the model call.
+See the [callback contract and system prompt](docs/reference.md#verification).
+
+Try `python examples/minimal/input_pair.py` locally without credentials.
+Use `signature_matching=True` after installing `cached-response[signatures]` and
+running `python -m nltk.downloader words`. `cache_signatures(path="cache.db")`
+shows persistent request/hit/miss counters.
+
+**Defaults changed:** normalized keys no longer authorize reuse. Existing cache
+entries start cold. `structural_matching=True` broadens retrieval only; changed
+histories still miss. This intentionally removes unsafe hits. Model review can
+still be wrong if metadata is declared incorrectly; measure correctness and total
+inference time, including verifier overhead.
 
 ## cached_staticmethod
 
@@ -94,7 +150,12 @@ Set options directly on either decorator:
 | `namespace="my-app"` | Keep separate applications or users' caches apart. |
 | `version="2"` | Stop reusing old results when a hidden dependency changes. |
 | `min_words=100` | Minimum input length for the LLM decorator only. |
-| `learning=False` | Turn off rule learning for the LLM decorator. |
+| `learning=False` | Turn off model verification for the LLM decorator. |
+| `metadata_paths=()` | Exact dotted string paths or wildcards declaring irrelevant metadata. |
+| `metadata_rules=()` | Reviewed regexes for irrelevant string fields; reuse without a review call. |
+| `verifier_version="1"` | Change this when your verifier policy or callback changes. |
+| `verifier_model=None` | Separate review model; `None` uses the original model. |
+| `verifier_timeout="10s"` | Maximum time spent waiting for each review. |
 | `verifier_overrider=...` | Replace the built-in LLM verification function. |
 
 Between days 1 and 7, the chance of refresh grows evenly: at day 4 it is 50%.
@@ -141,5 +202,35 @@ inputs and responses for matching and replay.
 Run `python examples/minimal/miss_diagnostics.py` for a local demonstration with
 no model/API calls. See [captured demo output](docs/miss-diagnostics-output.json)
 and [diagnostic details and limitations](docs/reference.md#miss-diagnostics).
+
+## Learn from real misses
+
+The package ships an agent skill. Read it or copy it into your project's skills:
+
+```sh
+cached-response --skill
+cached-response --install-skill .agents/skills
+```
+
+Ask your agent to use `configure-cached-response` on a repeated test. It inspects
+misses, checks which fields are irrelevant, proposes narrow rules, and measures
+correctness and total time. High-similarity misses include a `next_step` pointing
+to this skill. It cannot automatically enable logging or change your rules.
+
+When authorized test traffic needs full context, run this in the serving process:
+
+```python
+from cached_response import capture_misses
+
+with capture_misses("private/pairs.jsonl", include_text=True,
+                    limit=10, seconds=300) as capture:
+    run_real_test()  # Your test entry point
+print(capture)      # written, skipped, bytes
+```
+
+Capture defaults to redacted output. Raw capture includes complete request pairs
+and cached answers in a new private file, capped at 8 MB by default; oversized
+records are skipped. The hook restores on exit. Keep raw files out of commits.
+See [real blocked-hit patterns and the learning workflow](docs/learning-from-misses.md).
 
 [Runnable examples](examples/minimal/README.md) · [All settings](docs/reference.md)

@@ -89,7 +89,7 @@ def test_staticmethod_and_enum_input():
     assert Example.compute(int, Color.RED) == Example.compute(int, Color.RED)
 
 
-def test_uuid_references_are_rebound():
+def test_uuid_targets_require_fresh_response():
     calls = []
 
     @cached_llm_response(report=False)
@@ -100,8 +100,8 @@ def test_uuid_references_are_rebound():
 
     ask(body(UUID_A))
     result = ask(body(UUID_B))
-    assert result == {"text": f"Read {UUID_B}.", "arguments": json.dumps({"id": UUID_B}, separators=(",", ":"))}
-    assert len(calls) == 1
+    assert result == {"text": f"Read {UUID_B}.", "arguments": json.dumps({"id": UUID_B})}
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("mode", ["conservative", "testing", "risky"])
@@ -122,7 +122,7 @@ def test_meaningful_changes_miss(monkeypatch, mode, before, after):
     ask(body(after))
     assert len(calls) == 2
 
-    assert len(judges) == int(mode == "testing" and before == "503")
+    assert not judges
 
 
 def test_testing_handles_execution_ids_and_metadata(monkeypatch):
@@ -137,8 +137,8 @@ def test_testing_handles_execution_ids_and_metadata(monkeypatch):
     first = body('work kanban task t_1234abcd')
     second = body('work kanban task t_9876abef')
     ask(first)
-    assert "t_9876abef" in ask(second)["arguments"]
-    assert len(calls) == 1
+    assert "t_1234abcd" in ask(second)["arguments"]
+    assert len(calls) == 2
 
 
 def test_alias_relationship_is_preserved():
@@ -353,7 +353,7 @@ assert compute(3) == {'value': 3}
     assert marker.read_text() == "called\n"
 
 
-def test_risky_learns_scoped_patterns(monkeypatch, tmp_path):
+def test_risky_does_not_guess_identifier_patterns(monkeypatch, tmp_path):
     monkeypatch.setenv("CACHED_RESPONSE_MODE", "risky")
     import sqlite3
     calls = []
@@ -365,6 +365,6 @@ def test_risky_learns_scoped_patterns(monkeypatch, tmp_path):
 
     ask(body("abcd1234"))
     ask(body("efgh5678"))
-    assert len(calls) == 1
+    assert len(calls) == 2
     with sqlite3.connect(tmp_path / "private" / "cache.sqlite3") as db:
-        assert db.execute("SELECT COUNT(*) FROM rules").fetchone()[0] > 0
+        assert db.execute("SELECT count(*) FROM sqlite_master WHERE name='rules'").fetchone()[0] == 0
